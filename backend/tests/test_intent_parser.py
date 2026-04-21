@@ -54,9 +54,10 @@ def _install_chat(monkeypatch, responses: list[LLMResponse]):
 def test_plain_message_path(monkeypatch):
     captured = _install_chat(monkeypatch, [LLMResponse(kind="message", content="hello!")])
 
-    reply = intent_parser.handle_user_message("s1", "hi")
+    result = intent_parser.handle_user_message("s1", "hi")
 
-    assert reply == "hello!"
+    assert result.reply == "hello!"
+    assert result.tool_calls == []
     # First built message is the system prompt.
     assert captured[0][0]["role"] == "system"
     assert "note-taking" in captured[0][0]["content"].lower()
@@ -76,9 +77,12 @@ def test_single_tool_call_then_final_message(monkeypatch):
         ],
     )
 
-    reply = intent_parser.handle_user_message("s1", "save a note")
+    result = intent_parser.handle_user_message("s1", "save a note")
 
-    assert "Done" in reply
+    assert "Done" in result.reply
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "add_note"
+    assert result.tool_calls[0].result.ok is True
     recent = note_service.list_recent(limit=5)
     assert len(recent) == 1 and recent[0].title == "t"
 
@@ -116,17 +120,19 @@ def test_max_tool_hops_triggers_fallback(monkeypatch):
     # Supply more than enough to guarantee we hit the cap.
     captured = _install_chat(monkeypatch, [looping] * 20)
 
-    reply = intent_parser.handle_user_message("s1", "loop forever")
+    result = intent_parser.handle_user_message("s1", "loop forever")
 
-    assert "trouble" in reply.lower()
+    assert "trouble" in result.reply.lower()
     # Exactly max_tool_hops LLM calls were made.
     assert len(captured) == settings.max_tool_hops
+    # And every hop's tool call was recorded in the turn result.
+    assert len(result.tool_calls) == settings.max_tool_hops
 
 
 def test_empty_tool_calls_breaks_to_fallback(monkeypatch):
     _install_chat(monkeypatch, [LLMResponse(kind="tool_calls", tool_calls=[])])
-    reply = intent_parser.handle_user_message("s1", "weird")
-    assert "trouble" in reply.lower()
+    result = intent_parser.handle_user_message("s1", "weird")
+    assert "trouble" in result.reply.lower()
 
 
 # ---------- Pending-confirmation lifecycle ---------------------------------

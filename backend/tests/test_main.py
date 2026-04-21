@@ -163,6 +163,17 @@ def test_cors_allows_port_3001_fallback(client):
     assert r.headers["access-control-allow-origin"] == "http://localhost:3001"
 
 
+# ---------- / (root pointer) ----------------------------------------------
+
+def test_root_returns_pointer_to_ui_and_docs(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["service"] == "Note Agent API"
+    assert body["ui"] == "http://localhost:3000"
+    assert "/chat" in body["endpoints"]
+
+
 # ---------- /health --------------------------------------------------------
 
 def test_health_endpoint_is_reachable(client, monkeypatch):

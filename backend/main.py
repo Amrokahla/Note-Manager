@@ -48,6 +48,18 @@ def _model_is_available(list_response: Any, target: str) -> bool:
     return False
 
 
+@app.get("/")
+def root():
+    """Friendly pointer so hitting :8000 directly doesn't look broken.
+    The UI lives in the separate Next.js app on :3000."""
+    return {
+        "service": "Note Agent API",
+        "ui": "http://localhost:3000",
+        "docs": "/docs",
+        "endpoints": ["/health", "/chat"],
+    }
+
+
 @app.get("/health")
 def health():
     try:

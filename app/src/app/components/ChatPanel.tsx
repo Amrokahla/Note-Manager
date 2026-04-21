@@ -14,6 +14,8 @@ interface Props {
 
 export default function ChatPanel({ state, dispatch }: Props) {
   async function handleSubmit(text: string) {
+    if (!state.sessionId) return; // wait for the mount-time INIT_SESSION
+
     const turnId = crypto.randomUUID();
 
     // Echo the user bubble immediately so the UI feels responsive; then kick

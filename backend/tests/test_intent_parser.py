@@ -346,6 +346,201 @@ def test_gate_honors_pending_confirmation(monkeypatch):
     assert recorded_tools[0] is None
 
 
+# ---------- Pending-args merge (defense against LLM sending just the diff) --
+
+def test_merge_fills_in_dropped_fields_on_modify(monkeypatch):
+    """Simulates the exact 8B failure mode: after the add preview, the user
+    asks to change one field; the LLM re-calls add_note with ONLY the changed
+    field populated. The orchestrator must merge with the stored pending args
+    so the commit has the full note."""
+    _install_chat(
+        monkeypatch,
+        [
+            # Turn 1 hop 1: full add — returns needs_confirmation, preview is relayed.
+            LLMResponse(
+                kind="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        name="add_note",
+                        arguments={
+                            "title": "Meeting on Tuesday 5 PM",
+                            "description": "Meeting notes for discussion",
+                            "tag": None,
+                            "confirm": False,
+                        },
+                    )
+                ],
+            ),
+            # Turn 1 hop 2: LLM replies with preview text.
+            LLMResponse(kind="message", content="preview shown"),
+        ],
+    )
+    intent_parser.handle_user_message("s1", "save a note about meeting tuesday 5pm")
+
+    state = intent_parser.store.get("s1")
+    assert state.pending_confirmation is not None
+    assert state.pending_confirmation["args"]["title"] == "Meeting on Tuesday 5 PM"
+
+    # Turn 2: user says "make the tag meetings and save it".
+    # The LLM, at 8B, tends to emit only the delta. Simulate that:
+    _install_chat(
+        monkeypatch,
+        [
+            LLMResponse(
+                kind="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        name="add_note",
+                        arguments={
+                            "title": "",          # DROPPED — orchestrator should merge
+                            "description": "",    # DROPPED
+                            "tag": "meetings",    # the actual change
+                            "confirm": True,
+                        },
+                    )
+                ],
+            ),
+            LLMResponse(kind="message", content="Saved!"),
+        ],
+    )
+    intent_parser.handle_user_message("s1", "make the tag meetings and save it")
+
+    # The merge must have filled in title/description from pending.
+    saved = note_service.list_notes(limit=5)
+    assert len(saved) == 1
+    assert saved[0].title == "Meeting on Tuesday 5 PM"
+    assert saved[0].description == "Meeting notes for discussion"
+    assert saved[0].tag == "meetings"
+
+
+def test_merge_only_applies_to_mergeable_tools(monkeypatch):
+    """list_notes / search_notes / get_note are stateless — merge must be a no-op."""
+    from backend.agent.intent_parser import _merge_with_pending
+
+    state = intent_parser.store.get("s-no-merge")
+    state.pending_confirmation = {
+        "tool": "add_note",
+        "args": {"title": "pending", "description": "pending", "tag": None},
+    }
+    call = ToolCall(name="list_notes", arguments={"limit": 5})
+    assert _merge_with_pending(call, state) == {"limit": 5}
+
+
+def test_merge_no_op_when_no_pending_confirmation():
+    from backend.agent.intent_parser import _merge_with_pending
+
+    state = intent_parser.store.get("s-fresh")
+    call = ToolCall(name="add_note", arguments={"title": "T", "description": "D"})
+    merged = _merge_with_pending(call, state)
+    assert merged["title"] == "T"
+    assert merged["description"] == "D"
+
+
+def test_commit_intent_forces_confirm_on_compound_modify(monkeypatch):
+    """'make the tag meetings and create it' — model sends confirm=false but
+    user clearly wants commit. Orchestrator must force confirm=true."""
+    # Turn 1: initial add → pending confirmation stored.
+    _install_chat(
+        monkeypatch,
+        [
+            LLMResponse(
+                kind="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        name="add_note",
+                        arguments={
+                            "title": "Meeting",
+                            "description": "Tuesday 5pm",
+                            "tag": None,
+                            "confirm": False,
+                        },
+                    )
+                ],
+            ),
+            LLMResponse(kind="message", content="preview"),
+        ],
+    )
+    intent_parser.handle_user_message("s1", "add note for meeting")
+
+    # Turn 2: user says "tag meetings and create it" — LLM forgets confirm=true.
+    _install_chat(
+        monkeypatch,
+        [
+            LLMResponse(
+                kind="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        name="add_note",
+                        arguments={"tag": "meetings", "confirm": False},
+                    )
+                ],
+            ),
+            LLMResponse(kind="message", content="done"),
+        ],
+    )
+    intent_parser.handle_user_message("s1", "make the tag meetings and create it")
+
+    # Despite confirm=false from LLM, the note is actually saved because the
+    # orchestrator detected commit intent and forced confirm=true.
+    notes = note_service.list_notes()
+    assert len(notes) == 1
+    assert notes[0].title == "Meeting"
+    assert notes[0].tag == "meetings"
+
+
+def test_empty_string_fields_are_stripped_before_validation(monkeypatch):
+    """8B failure mode: model calls update_note with title='', description=''
+    when it means 'don't change these'. Orchestrator must treat empties as
+    omitted so the update merges with current values instead of failing
+    Pydantic min_length."""
+    existing = note_service.create_note(
+        "Meeting on Tuesday 5 pm",
+        "Meeting with the dev team on Tuesday at 5 pm",
+        tag="meetings",
+    )
+
+    _install_chat(
+        monkeypatch,
+        [
+            LLMResponse(
+                kind="tool_calls",
+                tool_calls=[
+                    ToolCall(
+                        name="update_note",
+                        arguments={
+                            "note_id": existing.id,
+                            "title": "",
+                            "description": "",
+                            "tag": None,
+                            "clear_tag": False,
+                            "confirm": False,
+                        },
+                    )
+                ],
+            ),
+            LLMResponse(kind="message", content="preview"),
+        ],
+    )
+
+    # The empty strings are stripped before validation → update_note hits the
+    # dispatcher's 'nothing to update' path with a clean error, not a Pydantic
+    # min_length rejection.
+    intent_parser.handle_user_message("s1", "change the meeting")
+
+    # Nothing changed in the DB (model didn't actually supply new values).
+    reloaded = note_service.get_note(existing.id)
+    assert reloaded.title == "Meeting on Tuesday 5 pm"
+
+
+def test_commit_intent_noop_when_no_pending(monkeypatch):
+    """Plain 'save it' with no pending confirmation does NOT force confirm."""
+    from backend.agent.intent_parser import _looks_like_commit_intent
+
+    assert _looks_like_commit_intent("save it now") is True
+    assert _looks_like_commit_intent("what are my tags?") is False
+    assert _looks_like_commit_intent("cancel") is False
+
+
 def test_sessions_are_isolated(monkeypatch):
     _install_chat(
         monkeypatch,

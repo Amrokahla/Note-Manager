@@ -135,25 +135,115 @@ def _build_messages(state: SessionState) -> list[dict]:
     return out
 
 
-def _run_tool_call(state: SessionState, call: ToolCall) -> ToolResult:
+_MERGEABLE_TOOLS = {"add_note", "update_note"}
+
+# Words that signal the user wants to commit a pending add/update RIGHT NOW
+# — paired with the pending confirmation, we force confirm=true regardless of
+# what the model sent. This is a belt-and-suspenders guard against the 8B
+# failure mode where the model sets confirm=false on compound commands like
+# "tag it X and save it".
+_COMMIT_INTENT_PATTERN = re.compile(
+    r"\b(save|saving|save\s+it|create|creating|create\s+it|commit|"
+    r"confirm|confirmed|add\s+it|do\s+it|go\s+ahead|yes|yeah|yep|"
+    r"ok(ay)?|sure)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_commit_intent(user_text: str) -> bool:
+    return bool(_COMMIT_INTENT_PATTERN.search(user_text))
+
+
+def _merge_with_pending(
+    call: ToolCall,
+    state: SessionState,
+    *,
+    force_confirm: bool = False,
+) -> dict:
+    """When there's an in-flight needs_confirmation for the same tool, merge
+    the new args onto the stored pending args. This defends against the 8B
+    model's habit of sending only the diff on a modify turn (e.g. "make the
+    tag meetings and save it" arriving as title="" description="" tag="meetings"
+    after the full title + description were already previewed).
+
+    Rules:
+      • Only mergeable tools (add_note, update_note) — search/list/get are stateless.
+      • Tool name must match the pending tool.
+      • New args overwrite only when they are "real values" — None and empty
+        strings don't clobber a prior value.
+    """
+    if call.name not in _MERGEABLE_TOOLS:
+        return dict(call.arguments)
+    pc = state.pending_confirmation
+    if not pc or pc.get("tool") != call.name:
+        return dict(call.arguments)
+
+    merged: dict = dict(pc.get("args") or {})
+    for key, value in call.arguments.items():
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        merged[key] = value
+    # Reset confirm to False for a fresh preview by default; caller may override
+    # via force_confirm when the user's message signals commit intent.
+    merged["confirm"] = bool(call.arguments.get("confirm") or force_confirm)
+    return merged
+
+
+def _sanitize_args(args: dict) -> dict:
+    """Remove empty-string values so they behave as 'field omitted' at the
+    schema layer. Models often emit `title: ""` when they mean 'don't touch
+    this field' — without this pass those would fail min_length validation."""
+    return {
+        k: v
+        for k, v in args.items()
+        if not (isinstance(v, str) and not v.strip())
+    }
+
+
+def _run_tool_call(
+    state: SessionState,
+    call: ToolCall,
+    *,
+    force_confirm: bool = False,
+) -> ToolResult:
     """Dispatch one tool call and record everything the next hop needs to see."""
-    result = note_tools.execute(call.name, call.arguments)
+    # Strip empty strings first so the merge and validation see only real
+    # values. 8B models sometimes send title="" / description="" to mean
+    # "I didn't compute a new value" — treat that as omission.
+    sanitized = ToolCall(name=call.name, arguments=_sanitize_args(call.arguments))
+    effective_args = _merge_with_pending(
+        sanitized, state, force_confirm=force_confirm
+    )
+    if effective_args != call.arguments:
+        logger.info(
+            "Merged pending args for %s: %s → %s",
+            call.name,
+            call.arguments,
+            effective_args,
+        )
+
+    result = note_tools.execute(call.name, effective_args)
     remember_referenced(state, result)
 
-    # Pending-confirmation state machine: set when a destructive tool asks
-    # for confirmation, cleared the moment any non-gated tool runs.
+    # Pending-confirmation state machine: set when a gated tool asks for
+    # confirmation, cleared the moment any non-gated tool runs. We stash the
+    # MERGED args so that a subsequent modify turn picks up the complete
+    # picture rather than just what the last LLM call sent.
     if result.needs_confirmation:
-        state.pending_confirmation = {"tool": call.name, "args": call.arguments}
+        state.pending_confirmation = {"tool": call.name, "args": effective_args}
     else:
         state.pending_confirmation = None
 
     # Persist the assistant's tool call AND the tool response into history so
-    # subsequent hops (and future turns) see the full trace.
+    # subsequent hops (and future turns) see the full trace. Record the
+    # merged args so history reflects what actually hit the dispatcher.
     state.messages.append(
         {
             "role": "assistant",
             "tool_calls": [
-                {"function": {"name": call.name, "arguments": call.arguments}}
+                {"function": {"name": call.name, "arguments": effective_args}}
             ],
         }
     )
@@ -201,6 +291,21 @@ def handle_user_message(
             user_text,
         )
 
+    # Commit-intent gate: if the user's message signals "commit now" during
+    # an active add/update confirmation, force confirm=true downstream.
+    # Defense against the LLM setting confirm=false on compound commands like
+    # "tag it X and save" — we can't rely on prompt compliance at 8B.
+    force_confirm = bool(
+        state.pending_confirmation
+        and state.pending_confirmation.get("tool") in _MERGEABLE_TOOLS
+        and _looks_like_commit_intent(user_text)
+    )
+    if force_confirm:
+        logger.info(
+            "Commit-intent detected for session %s — forcing confirm=true",
+            session_id,
+        )
+
     turn_calls: list[TurnToolCall] = []
 
     for _ in range(settings.max_tool_hops):
@@ -239,7 +344,7 @@ def handle_user_message(
                     "status": "running",
                 },
             )
-            result = _run_tool_call(state, call)
+            result = _run_tool_call(state, call, force_confirm=force_confirm)
             _emit("tool_result", _result_payload(tc_id, result))
             turn_calls.append(
                 TurnToolCall(

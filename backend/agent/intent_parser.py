@@ -205,7 +205,17 @@ def handle_user_message(
 
     for _ in range(settings.max_tool_hops):
         messages = _build_messages(state)
-        resp = llm_handler.chat(messages, tools=tools_for_turn)
+
+        # Stream content tokens as they arrive. For tool-call hops the stream
+        # typically yields nothing before the final chunk — no harm done.
+        # When the response turns out to be a plain message the user sees it
+        # token-by-token instead of as one block at the end.
+        def _forward_delta(delta: str) -> None:
+            _emit("assistant_delta", {"content": delta})
+
+        resp = llm_handler.chat(
+            messages, tools=tools_for_turn, on_delta=_forward_delta
+        )
 
         if resp.kind == "message":
             reply = resp.content or ""

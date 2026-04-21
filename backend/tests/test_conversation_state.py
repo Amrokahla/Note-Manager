@@ -156,6 +156,8 @@ def test_context_line_mentions_pending_confirmation():
     assert line is not None
     assert "delete_note" in line
     assert "confirm=true" in line
+    # Context now covers modification in addition to yes/no.
+    assert "Modification" in line or "modify" in line.lower()
 
 
 def test_context_line_combines_ids_and_pending_confirmation():

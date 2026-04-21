@@ -15,6 +15,7 @@ export interface ChatHandlers {
     message?: string;
     errorCode?: string;
   }) => void;
+  onAssistantDelta: (delta: string) => void;
   onAssistant: (content: string) => void;
   onDone: () => void;
   onError: (err: string) => void;
@@ -167,6 +168,10 @@ function dispatchFrame(
       });
       return "continue";
     }
+
+    case "assistant_delta":
+      handlers.onAssistantDelta((payload as AssistantPayload).content);
+      return "continue";
 
     case "assistant":
       handlers.onAssistant((payload as AssistantPayload).content);

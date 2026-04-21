@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 from ollama import Client
 from pydantic import BaseModel, Field
@@ -78,14 +78,26 @@ def _coerce_arguments(raw: Any) -> dict:
 
 # --- Public entry point -----------------------------------------------------
 
-def chat(messages: list[dict], *, tools: list[dict] | None = None) -> LLMResponse:
+def chat(
+    messages: list[dict],
+    *,
+    tools: list[dict] | None = None,
+    on_delta: Callable[[str], None] | None = None,
+) -> LLMResponse:
     """Send `messages` to Ollama and return a normalized `LLMResponse`.
 
-    Temperature is fixed at 0.2 (PLAN §5.4): low enough to prefer tool calls
-    over creative prose, not zero because fully deterministic decoding at 3B
-    sometimes loops on refusals.
+    If `on_delta` is provided, uses Ollama's streaming mode: each content
+    chunk is forwarded to `on_delta` as it arrives. Tool calls and the final
+    aggregated content are returned in the LLMResponse as usual. Callers that
+    don't need streaming (tests, background tasks) can omit `on_delta`.
+
+    Temperature is fixed at 0.2 — low enough to prefer tool calls over
+    creative prose, but not zero so the model doesn't loop on refusals.
     """
     client = _get_client()
+    if on_delta is not None:
+        return _chat_streaming(client, messages, tools, on_delta)
+
     resp = client.chat(
         model=settings.ollama_model,
         messages=messages,
@@ -93,6 +105,58 @@ def chat(messages: list[dict], *, tools: list[dict] | None = None) -> LLMRespons
         options={"temperature": 0.2},
     )
     data = _as_dict(resp)
+    return _normalize_response(data)
+
+
+def _chat_streaming(
+    client: Client,
+    messages: list[dict],
+    tools: list[dict] | None,
+    on_delta: Callable[[str], None],
+) -> LLMResponse:
+    stream = client.chat(
+        model=settings.ollama_model,
+        messages=messages,
+        tools=tools if tools is not None else TOOL_DEFS,
+        options={"temperature": 0.2},
+        stream=True,
+    )
+
+    full_content = ""
+    accumulated_tool_calls: list[dict] = []
+    last_chunk: dict | None = None
+
+    for chunk in stream:
+        data = _as_dict(chunk)
+        last_chunk = data
+        msg = data.get("message") or {}
+
+        content_delta = msg.get("content") or ""
+        if content_delta:
+            full_content += content_delta
+            on_delta(content_delta)
+
+        # Ollama's tool_calls usually appear in the final chunk. Some builds
+        # include a partial list in earlier chunks — accumulate either way.
+        raw_tool_calls = msg.get("tool_calls") or []
+        if raw_tool_calls:
+            accumulated_tool_calls.extend(raw_tool_calls)
+
+    synthesized = {
+        "message": {
+            "content": full_content,
+            "tool_calls": accumulated_tool_calls,
+        }
+    }
+    if last_chunk is not None:
+        # Keep the final chunk's metadata (done_reason etc.) around in `raw`.
+        synthesized.update(
+            {k: v for k, v in last_chunk.items() if k != "message"}
+        )
+    return _normalize_response(synthesized)
+
+
+def _normalize_response(data: dict) -> LLMResponse:
     msg = data.get("message") or {}
 
     raw_tool_calls = msg.get("tool_calls") or []

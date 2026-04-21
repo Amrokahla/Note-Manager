@@ -41,6 +41,8 @@ export default function ChatPanel({ state, dispatch }: Props) {
           message: r.message,
           errorCode: r.errorCode,
         }),
+      onAssistantDelta: (delta) =>
+        dispatch({ type: "ASSISTANT_DELTA", content: delta, turnId }),
       onAssistant: (content) =>
         dispatch({ type: "ASSISTANT_MESSAGE", content, turnId }),
       onStreamDrop: () => dispatch({ type: "STREAM_DROP" }),

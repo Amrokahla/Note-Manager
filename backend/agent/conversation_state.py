@@ -116,10 +116,16 @@ def build_context_line(state: SessionState) -> str | None:
         tool = pc.get("tool", "<unknown>")
         args = pc.get("args") or {}
         parts.append(
-            f"You previously asked the user to confirm a `{tool}` call with "
-            f"arguments {args}. If their latest message is affirmative, call "
-            f"`{tool}` again with confirm=true; if it's negative, acknowledge "
-            f"and do not call the tool."
+            f"A `{tool}` call is awaiting confirmation with arguments {args}. "
+            "Interpret the user's latest message in that context:\n"
+            f"  • Affirmative ('yes', 'save it', 'confirm', 'go ahead') → call "
+            f"`{tool}` again with the SAME arguments plus confirm=true.\n"
+            f"  • Negative ('no', 'cancel', 'never mind') → acknowledge in plain "
+            f"text and do NOT call the tool.\n"
+            "  • Modification ('use tag X', 'change title to Y', 'different "
+            "description') → MERGE the change into the pending arguments and "
+            f"call `{tool}` again with confirm=false to re-preview. Do NOT "
+            "start a new add/update from scratch — continue the pending one."
         )
 
     if not parts:

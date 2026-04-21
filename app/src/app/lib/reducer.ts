@@ -4,6 +4,7 @@ import { newSessionId } from "./session";
 export type Action =
   | { type: "INIT_SESSION"; sessionId: string }
   | { type: "USER_MESSAGE"; content: string; turnId: string }
+  | { type: "ASSISTANT_DELTA"; content: string; turnId: string }
   | { type: "ASSISTANT_MESSAGE"; content: string; turnId: string }
   | { type: "TOOL_CALL_START"; call: ToolCallRecord }
   | {
@@ -55,11 +56,27 @@ export function appReducer(state: AppState, action: Action): AppState {
         ],
       };
 
-    case "ASSISTANT_MESSAGE":
+    case "ASSISTANT_DELTA": {
+      // Append to the last assistant message for this turn. If none exists
+      // yet (first delta of the turn), create a placeholder we'll keep
+      // appending to. The final ASSISTANT_MESSAGE will overwrite the content
+      // with the server's authoritative version — cheap safety net in case
+      // the stream and the final differ.
+      const msgs = state.messages;
+      const last = msgs[msgs.length - 1];
+      if (last && last.role === "assistant" && last.turnId === action.turnId) {
+        return {
+          ...state,
+          messages: [
+            ...msgs.slice(0, -1),
+            { ...last, content: last.content + action.content },
+          ],
+        };
+      }
       return {
         ...state,
         messages: [
-          ...state.messages,
+          ...msgs,
           {
             id: crypto.randomUUID(),
             role: "assistant",
@@ -69,6 +86,37 @@ export function appReducer(state: AppState, action: Action): AppState {
           },
         ],
       };
+    }
+
+    case "ASSISTANT_MESSAGE": {
+      // If we already streamed an assistant message for this turn, finalize
+      // it (replace content in case of drift, keep id and createdAt).
+      // Otherwise create a fresh one (non-streaming path).
+      const msgs = state.messages;
+      const last = msgs[msgs.length - 1];
+      if (last && last.role === "assistant" && last.turnId === action.turnId) {
+        return {
+          ...state,
+          messages: [
+            ...msgs.slice(0, -1),
+            { ...last, content: action.content },
+          ],
+        };
+      }
+      return {
+        ...state,
+        messages: [
+          ...msgs,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: action.content,
+            createdAt: Date.now(),
+            turnId: action.turnId,
+          },
+        ],
+      };
+    }
 
     case "TOOL_CALL_START":
       return { ...state, toolCalls: [...state.toolCalls, action.call] };

@@ -233,6 +233,60 @@ def test_update_note_clear_tag_preview_then_commit():
     assert commit.data["tag"] is None
 
 
+def test_update_note_auto_syncs_time_across_fields():
+    """The 8B failure mode: LLM updates 'title' to change 5pm→4pm but forgets
+    to apply the same edit in description. Server must auto-propagate the
+    numeric substitution so both fields stay consistent."""
+    n = note_service.create_note(
+        "New meeting on Wednesday at 5 pm",
+        "Meeting with the finance team on Wednesday at 5 pm",
+        tag="meetings",
+    )
+    # LLM passes the updated title only — auto-sync should patch description too.
+    r = note_tools.execute(
+        "update_note",
+        {"note_id": n.id, "title": "New meeting on Wednesday at 4 pm"},
+    )
+    assert r.ok is False  # preview, not yet committed
+    assert r.needs_confirmation is True
+    # Critical: preview's description must now have "4 pm", not "5 pm".
+    assert "4 pm" in r.data["preview"]["description"]
+    assert "5 pm" not in r.data["preview"]["description"]
+
+
+def test_update_note_auto_sync_commits_synced_values():
+    """On confirm=true, the DB reflects the auto-synced values, not the raw
+    LLM args."""
+    n = note_service.create_note(
+        "Meeting at 3 pm", "Standup at 3 pm", tag="work"
+    )
+    r = note_tools.execute(
+        "update_note",
+        {"note_id": n.id, "title": "Meeting at 6 pm", "confirm": True},
+    )
+    assert r.ok is True
+    fetched = note_service.get_note(n.id)
+    assert "6 pm" in fetched.title
+    # Description auto-synced from 3→6
+    assert "6 pm" in fetched.description
+    assert "3 pm" not in fetched.description
+
+
+def test_update_note_does_not_auto_sync_word_changes():
+    """Non-numeric substitutions must NOT propagate — that's a false-positive
+    risk. Only digit-containing changes auto-sync."""
+    n = note_service.create_note(
+        "Groceries", "Buy apples and bread", tag=None
+    )
+    r = note_tools.execute(
+        "update_note",
+        {"note_id": n.id, "title": "Supplies"},
+    )
+    assert r.ok is False
+    # Description unchanged — "apples" still there, "groceries" → "supplies" NOT propagated.
+    assert r.data["preview"]["description"] == "Buy apples and bread"
+
+
 def test_update_note_not_found():
     r = note_tools.execute("update_note", {"note_id": 999, "title": "x"})
     assert r.ok is False

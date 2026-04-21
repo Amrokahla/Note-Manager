@@ -16,15 +16,11 @@ class Settings:
     db_path: str = os.getenv("DB_PATH", "./data/notes.db")
     max_tool_hops: int = int(os.getenv("MAX_TOOL_HOPS", "5"))
     history_turns: int = int(os.getenv("HISTORY_TURNS", "20"))
-    # Cosine similarity cutoff for semantic search. Notes below this threshold
-    # don't appear in results — keeps "no match" honest instead of returning
-    # weakly-related notes that look confident.
-    # Cosine similarity cutoff for semantic search. Notes at/above this land
-    # as confident matches. When nothing clears the bar, the tool still surfaces
-    # the top few as a "best-effort" list so the user can see what's closest.
     search_threshold: float = float(os.getenv("SEARCH_THRESHOLD", "0.35"))
-    # How many fallback candidates to surface when no note beats the threshold.
     search_fallback_limit: int = int(os.getenv("SEARCH_FALLBACK_LIMIT", "3"))
+    # Google Gemini — optional. Only required when the UI selects a gemini-*
+    # model. Never logged; .env is gitignored.
+    gemini_api_key: str | None = os.getenv("GEMINI_API_KEY") or None
 
 
 settings = Settings()

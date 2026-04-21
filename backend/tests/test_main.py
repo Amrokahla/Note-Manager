@@ -42,7 +42,7 @@ def client() -> TestClient:
 # ---------- /chat ----------------------------------------------------------
 
 def test_chat_returns_reply_shape(client, monkeypatch):
-    def fake_handle(session_id, message):
+    def fake_handle(session_id, message, *, model=None):
         return TurnResult(reply=f"echo: {message}", tool_calls=[])
 
     monkeypatch.setattr(intent_parser, "handle_user_message", fake_handle)
@@ -57,7 +57,7 @@ def test_chat_returns_reply_shape(client, monkeypatch):
 
 
 def test_chat_serializes_tool_calls(client, monkeypatch):
-    def fake_handle(session_id, message):
+    def fake_handle(session_id, message, *, model=None):
         tool_result = ToolResult(
             ok=True,
             message="Created note #17.",
@@ -99,7 +99,7 @@ def test_chat_serializes_tool_calls(client, monkeypatch):
 
 
 def test_chat_preserves_needs_confirmation(client, monkeypatch):
-    def fake_handle(session_id, message):
+    def fake_handle(session_id, message, *, model=None):
         tool_result = ToolResult(
             ok=False,
             needs_confirmation=True,
@@ -188,7 +188,7 @@ def _parse_sse(payload: str) -> list[tuple[str, dict]]:
 
 
 def test_stream_emits_full_happy_sequence(client, monkeypatch):
-    def fake_handle(session_id, message, emit=None):
+    def fake_handle(session_id, message, emit=None, *, model=None):
         assert emit is not None
         emit("user_echo", {"message": message})
         emit(
@@ -242,7 +242,7 @@ def test_stream_emits_full_happy_sequence(client, monkeypatch):
 
 
 def test_stream_emits_error_event_on_orchestrator_exception(client, monkeypatch):
-    def fake_handle(session_id, message, emit=None):
+    def fake_handle(session_id, message, emit=None, *, model=None):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(intent_parser, "handle_user_message", fake_handle)

@@ -1,8 +1,10 @@
-import type { AppState, ToolCallRecord, ToolStatus } from "../types";
+import type { AppState, ModelId, ToolCallRecord, ToolStatus } from "../types";
+import { DEFAULT_MODEL } from "../types";
 import { newSessionId } from "./session";
 
 export type Action =
   | { type: "INIT_SESSION"; sessionId: string }
+  | { type: "SET_MODEL"; model: ModelId }
   | { type: "USER_MESSAGE"; content: string; turnId: string }
   | { type: "ASSISTANT_DELTA"; content: string; turnId: string }
   | { type: "ASSISTANT_MESSAGE"; content: string; turnId: string }
@@ -31,6 +33,7 @@ export function initialState(seed?: Partial<AppState>): AppState {
     messages: seed?.messages ?? [],
     toolCalls: seed?.toolCalls ?? [],
     isStreaming: false,
+    model: seed?.model ?? DEFAULT_MODEL,
     error: undefined,
   };
 }
@@ -40,6 +43,9 @@ export function appReducer(state: AppState, action: Action): AppState {
     case "INIT_SESSION":
       // Idempotent: ignore a second init if we already have a session.
       return state.sessionId ? state : { ...state, sessionId: action.sessionId };
+
+    case "SET_MODEL":
+      return state.model === action.model ? state : { ...state, model: action.model };
 
     case "USER_MESSAGE":
       return {
@@ -170,7 +176,8 @@ export function appReducer(state: AppState, action: Action): AppState {
 
     case "RESET":
       // Fired from a click handler — always client-side, so generating a
-      // fresh UUID here is safe (no SSR path).
-      return initialState({ sessionId: newSessionId() });
+      // fresh UUID here is safe (no SSR path). Preserve the current model
+      // choice so a reset doesn't wipe the user's selector pick.
+      return initialState({ sessionId: newSessionId(), model: state.model });
   }
 }

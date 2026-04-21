@@ -303,7 +303,7 @@ def test_gate_enables_tools_for_note_request(monkeypatch):
     """When the input looks like a note op, chat() must receive full tool defs."""
     recorded_tools: list = []
 
-    def fake_chat(messages, *, tools=None, on_delta=None):
+    def fake_chat(messages, *, tools=None, on_delta=None, model=None):
         recorded_tools.append(tools)
         return LLMResponse(kind="message", content="ok")
 
@@ -317,7 +317,7 @@ def test_gate_disables_tools_passes_empty_list(monkeypatch):
     """When the input is small talk, chat() must receive tools=[]."""
     recorded_tools: list = []
 
-    def fake_chat(messages, *, tools=None, on_delta=None):
+    def fake_chat(messages, *, tools=None, on_delta=None, model=None):
         recorded_tools.append(tools)
         return LLMResponse(kind="message", content="Hi!")
 
@@ -334,7 +334,7 @@ def test_gate_honors_pending_confirmation(monkeypatch):
 
     recorded_tools: list = []
 
-    def fake_chat(messages, *, tools=None, on_delta=None):
+    def fake_chat(messages, *, tools=None, on_delta=None, model=None):
         recorded_tools.append(tools)
         return LLMResponse(kind="message", content="ok")
 

@@ -28,7 +28,7 @@ export default function ChatPanel({ state, dispatch }: Props) {
     dispatch({ type: "USER_MESSAGE", content: text, turnId });
     dispatch({ type: "STREAM_START" });
 
-    await sendMessage(state.sessionId, text, turnId, {
+    await sendMessage(state.sessionId, text, turnId, state.model, {
       onUserEcho: () => {
         /* we already echoed above; noop keeps parity with F3 event flow */
       },

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import difflib
 import logging
+import re
 from typing import Callable
 
 from pydantic import ValidationError
@@ -144,6 +146,59 @@ def _get_note(raw: dict) -> ToolResult:
     )
 
 
+_DIGIT_RE = re.compile(r"\d")
+
+
+def _extract_digit_substitutions(old: str, new: str) -> list[tuple[str, str]]:
+    """Token-level replacements where at least one side contains a digit.
+
+    Conservative by design: only numeric substitutions (times like '5 pm',
+    dates, quantities) propagate across fields. Plain word swaps don't —
+    that would false-positive on unrelated descriptions.
+    """
+    old_tokens, new_tokens = old.split(), new.split()
+    matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens)
+    subs: list[tuple[str, str]] = []
+    for op, i1, i2, j1, j2 in matcher.get_opcodes():
+        if op != "replace":
+            continue
+        old_tok = " ".join(old_tokens[i1:i2])
+        new_tok = " ".join(new_tokens[j1:j2])
+        if _DIGIT_RE.search(old_tok) or _DIGIT_RE.search(new_tok):
+            subs.append((old_tok, new_tok))
+    return subs
+
+
+def _auto_sync_fields(
+    current_title: str,
+    current_description: str,
+    new_title: str,
+    new_description: str,
+) -> tuple[str, str]:
+    """If the LLM updated only one of title/description but the numeric edit
+    also applies to the other field, propagate it. Belt-and-suspenders fix
+    for the 8B failure mode where the model misses one of two fields that
+    both mention '5 pm'."""
+    title_changed = current_title != new_title
+    desc_changed = current_description != new_description
+
+    # Title changed, description wasn't — propagate into description
+    if title_changed and not desc_changed:
+        for old_tok, new_tok in _extract_digit_substitutions(current_title, new_title):
+            if old_tok in new_description:
+                new_description = new_description.replace(old_tok, new_tok)
+
+    # Description changed, title wasn't — propagate into title
+    elif desc_changed and not title_changed:
+        for old_tok, new_tok in _extract_digit_substitutions(
+            current_description, new_description
+        ):
+            if old_tok in new_title:
+                new_title = new_title.replace(old_tok, new_tok)
+
+    return new_title, new_description
+
+
 def _update_note(raw: dict) -> ToolResult:
     args = UpdateNoteArgs.model_validate(raw)
     if (
@@ -166,15 +221,26 @@ def _update_note(raw: dict) -> ToolResult:
             message=f"No note with id {args.note_id}.",
         )
 
+    # Compute merged fields + auto-sync any numeric edit across title/description.
+    # If the LLM updated only one of them but the edit is a time/date/quantity
+    # change that also applies to the other, propagate it.
+    proposed_title = args.title if args.title is not None else current.title
+    proposed_description = (
+        args.description if args.description is not None else current.description
+    )
+    synced_title, synced_description = _auto_sync_fields(
+        current.title, current.description, proposed_title, proposed_description
+    )
+
+    if args.clear_tag:
+        new_tag: str | None = None
+    elif args.tag is not None:
+        new_tag = args.tag
+    else:
+        new_tag = current.tag
+
     # Two-step gate — preview the merged fields BEFORE committing.
     if not args.confirm:
-        new_tag: str | None
-        if args.clear_tag:
-            new_tag = None
-        elif args.tag is not None:
-            new_tag = args.tag
-        else:
-            new_tag = current.tag
         return ToolResult(
             ok=False,
             needs_confirmation=True,
@@ -187,21 +253,24 @@ def _update_note(raw: dict) -> ToolResult:
             data={
                 "preview": {
                     "id": current.id,
-                    "title": args.title if args.title is not None else current.title,
-                    "description": (
-                        args.description
-                        if args.description is not None
-                        else current.description
-                    ),
+                    "title": synced_title,
+                    "description": synced_description,
                     "tag": new_tag,
                 }
             },
         )
 
+    # If auto-sync adjusted fields, commit the synced values (not the raw LLM ones).
+    commit_title = synced_title if synced_title != proposed_title else args.title
+    commit_description = (
+        synced_description
+        if synced_description != proposed_description
+        else args.description
+    )
     updated = note_service.update_note(
         args.note_id,
-        title=args.title,
-        description=args.description,
+        title=commit_title,
+        description=commit_description,
         tag=args.tag,
         clear_tag=args.clear_tag,
     )

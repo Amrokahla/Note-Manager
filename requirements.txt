@@ -2,7 +2,9 @@ fastapi
 uvicorn[standard]
 pydantic>=2
 ollama
+google-genai
 python-dotenv
 numpy
 pytest
+httpx
 rich

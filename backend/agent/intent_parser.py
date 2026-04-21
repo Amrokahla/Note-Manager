@@ -261,6 +261,8 @@ def handle_user_message(
     session_id: str,
     user_text: str,
     emit: EmitFunc | None = None,
+    *,
+    model: str = llm_handler.DEFAULT_MODEL,
 ) -> TurnResult:
     """Run one user turn through the agent loop.
 
@@ -319,7 +321,10 @@ def handle_user_message(
             _emit("assistant_delta", {"content": delta})
 
         resp = llm_handler.chat(
-            messages, tools=tools_for_turn, on_delta=_forward_delta
+            messages,
+            tools=tools_for_turn,
+            on_delta=_forward_delta,
+            model=model,
         )
 
         if resp.kind == "message":

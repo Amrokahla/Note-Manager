@@ -1,4 +1,4 @@
-import type { ToolCallRecord, ToolStatus } from "../types";
+import type { ModelId, ToolCallRecord, ToolStatus } from "../types";
 
 // F3: streaming POST /chat/stream per FRONTEND_PLAN §4.2. The backend is an
 // SSE source whose event names are: user_echo, tool_call, tool_result,
@@ -53,6 +53,7 @@ export async function sendMessage(
   sessionId: string,
   message: string,
   turnId: string,
+  model: ModelId,
   handlers: ChatHandlers,
 ): Promise<void> {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -65,7 +66,7 @@ export async function sendMessage(
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       },
-      body: JSON.stringify({ session_id: sessionId, message }),
+      body: JSON.stringify({ session_id: sessionId, message, model }),
     });
   } catch {
     handlers.onError(

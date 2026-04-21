@@ -4,8 +4,9 @@ from typing import Any
 
 import pytest
 
-from backend.agent import llm_handler
-from backend.agent.llm_handler import LLMResponse, ToolCall, _try_parse_toolcall_from_text
+from backend.agent import llm_handler, llm_ollama
+from backend.agent.llm_handler import LLMResponse, ToolCall
+from backend.agent.llm_ollama import _try_parse_toolcall_from_text
 
 
 class _FakeClient:
@@ -23,7 +24,7 @@ class _FakeClient:
 @pytest.fixture
 def fake_client(monkeypatch):
     client = _FakeClient(canned={"message": {"role": "assistant", "content": ""}})
-    monkeypatch.setattr(llm_handler, "_client", client)
+    monkeypatch.setattr(llm_ollama, "_client", client)
     return client
 
 
@@ -112,7 +113,7 @@ def test_chat_passes_tools_model_and_temperature(fake_client):
 
     kwargs = fake_client.last_call
     assert kwargs is not None
-    assert kwargs["model"] == llm_handler.settings.ollama_model
+    assert kwargs["model"] == llm_ollama.settings.ollama_model
     assert kwargs["options"] == {"temperature": 0.2}
     # Tools default to TOOL_DEFS — sanity-check a known name is present.
     names = {t["function"]["name"] for t in kwargs["tools"]}

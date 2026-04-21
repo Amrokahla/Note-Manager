@@ -14,6 +14,7 @@ from ollama import Client
 from pydantic import BaseModel, Field
 
 from backend.agent import intent_parser
+from backend.agent.llm_handler import DEFAULT_MODEL, MODEL_OPTIONS
 from backend.config import settings
 from backend.db.sqlite import init_db
 from backend.services import note_service
@@ -95,6 +96,9 @@ def health():
 class ChatIn(BaseModel):
     session_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1)
+    # Which LLM to use for THIS turn. Accepts any id in llm_handler.MODEL_OPTIONS.
+    # Unknown values silently fall back to the default — keeps old clients working.
+    model: str = Field(default=DEFAULT_MODEL)
 
 
 class ChatToolCall(BaseModel):
@@ -110,9 +114,25 @@ class ChatOut(BaseModel):
     tool_calls: list[ChatToolCall]
 
 
+def _resolved_model(requested: str) -> str:
+    return requested if requested in MODEL_OPTIONS else DEFAULT_MODEL
+
+
+@app.get("/models")
+def models():
+    """Expose the allowed model ids so the UI can render a selector without
+    hard-coding options."""
+    return {
+        "default": DEFAULT_MODEL,
+        "options": list(MODEL_OPTIONS.keys()),
+    }
+
+
 @app.post("/chat", response_model=ChatOut)
 def chat(body: ChatIn) -> ChatOut:
-    turn = intent_parser.handle_user_message(body.session_id, body.message)
+    turn = intent_parser.handle_user_message(
+        body.session_id, body.message, model=_resolved_model(body.model)
+    )
     return ChatOut(
         session_id=body.session_id,
         reply=turn.reply,
@@ -139,7 +159,7 @@ def _format_sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
-def _sse_stream(session_id: str, message: str) -> Iterator[str]:
+def _sse_stream(session_id: str, message: str, model: str) -> Iterator[str]:
     q: queue.Queue[tuple[str, dict] | object] = queue.Queue()
     sentinel = object()
 
@@ -148,7 +168,9 @@ def _sse_stream(session_id: str, message: str) -> Iterator[str]:
 
     def run_orchestrator() -> None:
         try:
-            intent_parser.handle_user_message(session_id, message, emit=emit)
+            intent_parser.handle_user_message(
+                session_id, message, emit=emit, model=model
+            )
         except Exception as e:
             logger.exception("Orchestrator crashed while streaming")
             q.put(("error", {"message": f"{type(e).__name__}: {e}"}))
@@ -168,7 +190,7 @@ def _sse_stream(session_id: str, message: str) -> Iterator[str]:
 @app.post("/chat/stream")
 def chat_stream(body: ChatIn) -> StreamingResponse:
     return StreamingResponse(
-        _sse_stream(body.session_id, body.message),
+        _sse_stream(body.session_id, body.message, _resolved_model(body.model)),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

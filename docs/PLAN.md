@@ -268,9 +268,8 @@ Aimed at ~72h budget; each milestone is independently shippable.
 | M3 | LLM loop (no confirmation yet) | End-to-end: "add a note about X" works in CLI |
 | M4 | State + multi-turn + disambiguation | "that note" references resolve |
 | M5 | Destructive confirmation flow | Delete requires yes/no |
-| M6 | Minimal UI in `/app` | Chat box works in the browser |
-| M7 | Eval harness (15 scenarios) | `eval/report.md` generated |
-| M8 | README + tool-schema docs | Submission-ready |
+| M6 | Eval harness (15 scenarios) | `eval/report.md` generated |
+| M7 | README + tool-schema docs | Submission-ready |
 | B1–B4 | Bonuses | As time allows |
 
 ---
@@ -948,76 +947,6 @@ When a tool returns `needs_confirmation`, we set `state.pending_confirmation` an
 
 ---
 
-## Phase 8 — HTTP Surface & Minimal UI
-
-### 8.1 `backend/main.py` (expanded)
-
-```python
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from backend.agent import intent_parser
-from backend.db.sqlite import init_db
-
-app = FastAPI()
-
-class ChatIn(BaseModel):
-    session_id: str
-    message: str
-
-class ChatOut(BaseModel):
-    reply: str
-
-@app.on_event("startup")
-def _startup(): init_db()
-
-@app.post("/chat", response_model=ChatOut)
-def chat(body: ChatIn):
-    return ChatOut(reply=intent_parser.handle_user_message(body.session_id, body.message))
-
-app.mount("/", StaticFiles(directory="app", html=True), name="app")
-```
-
-### 8.2 `app/` — minimal chat UI
-
-Plain HTML + a tiny fetch-based JS file. No build step, no framework.
-
-```html
-<!-- app/index.html -->
-<!doctype html>
-<html><head><meta charset="utf-8"><title>Note Agent</title>
-<style>
-  body{font-family:system-ui;max-width:720px;margin:2rem auto;padding:0 1rem}
-  #log{border:1px solid #ddd;padding:1rem;height:60vh;overflow:auto;border-radius:8px}
-  .u{color:#0b5}.a{color:#222}
-  form{display:flex;gap:.5rem;margin-top:1rem}
-  input{flex:1;padding:.6rem;border:1px solid #ccc;border-radius:6px}
-  button{padding:.6rem 1rem}
-</style></head>
-<body>
-  <h1>Note Agent</h1>
-  <div id="log"></div>
-  <form id="f"><input id="m" autocomplete="off" placeholder="Talk to your notes…"><button>Send</button></form>
-<script>
-  const sid = crypto.randomUUID();
-  const log = document.getElementById("log");
-  const say = (who, text) => { log.innerHTML += `<p class="${who}"><b>${who==='u'?'You':'Agent'}:</b> ${text}</p>`; log.scrollTop = log.scrollHeight; };
-  document.getElementById("f").onsubmit = async (e) => {
-    e.preventDefault();
-    const m = document.getElementById("m"); const text = m.value.trim(); if(!text) return;
-    say("u", text); m.value = "";
-    const r = await fetch("/chat",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({session_id:sid, message:text})});
-    const j = await r.json(); say("a", j.reply);
-  };
-</script></body></html>
-```
-
-### 8.3 Definition of Done
-- Opening `http://localhost:8000/` shows the chat, and a full CRUD flow works from the browser.
-
----
-
 ## Phase 9 — Evaluation Harness (`backend/eval/test_cases.py`)
 
 **Goal:** run the 15 scenarios and emit a markdown report.
@@ -1229,7 +1158,6 @@ if semantic:
 | 5 | LLM wrapper | `agent/llm_handler.py` | How we *use* the model |
 | 6 | Session state | `agent/conversation_state.py` | Multi-turn awareness |
 | 7 | Orchestrator | `agent/intent_parser.py` | Loop control + robustness |
-| 8 | HTTP + UI | `main.py`, `app/index.html` | Demo-ability |
 | 9 | Eval harness | `eval/test_cases.py` | **Explicit requirement** |
 | 10 | Docs | `README.md`, `docs/TOOLS.md` | Submission quality |
 | 11–14 | Bonuses | Docker / semantic / multi-user / MCP | Upside |

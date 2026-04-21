@@ -80,7 +80,6 @@ Work phase-by-phase as defined in `docs/PLAN.md` Part II. Each phase has a "Defi
 | 5 | LLM handler | `backend/agent/llm_handler.py` |
 | 6 | Session state | `backend/agent/conversation_state.py` |
 | 7 | Orchestrator | `backend/agent/intent_parser.py` |
-| 8 | HTTP + UI wiring | `backend/main.py` |
 | 9 | Eval harness | `backend/eval/test_cases.py` |
 | 10 | Docs | `README.md`, `docs/TOOLS.md` |
 | 11+ | Bonuses | Docker, semantic search, multi-user, MCP |

@@ -1124,7 +1124,7 @@ Pass rate: 13/15 (86.7%)
 ### 11.1 `Dockerfile` (backend)
 
 ```dockerfile
-FROM python:3.12-slim
+FROM python:3.10-slim
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

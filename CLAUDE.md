@@ -157,7 +157,7 @@ docker compose logs -f app
 ## 5. Coding Conventions
 
 ### Python
-- **Python 3.12+**, type hints everywhere, `from __future__ import annotations` at the top.
+- **Python 3.10**, type hints everywhere, `from __future__ import annotations` at the top (required — lets us use `X | Y` and `list[X]` while still staying 3.10-compatible).
 - **Pydantic v2** for all external-facing data (tool args, tool results, API bodies). Use `model_json_schema()`, not hand-written JSON.
 - **Dataclasses** for internal state (session state, settings).
 - **No decorators-as-config** (skip FastAPI dependency magic unless clearly justified).

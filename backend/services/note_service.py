@@ -1,111 +1,124 @@
 from __future__ import annotations
 
+import logging
 import sqlite3
 from datetime import datetime, timezone
-from typing import Iterable
 
+from backend.config import settings
 from backend.db.sqlite import tx
-from backend.services.models import Note, NoteSummary
+from backend.services import embeddings
+from backend.services.models import Note, NoteSummary, TagCount
+
+logger = logging.getLogger(__name__)
 
 
-def normalize_tag(t: str) -> str:
-    return t.strip().lstrip("#").lower()
+# --- Tag normalization ------------------------------------------------------
+#
+# Single tag per note (redesigned). We strip/lowercase/peel leading # so the
+# same tag in different forms collapses. Empty strings become None.
+
+def normalize_tag(t: str | None) -> str | None:
+    if t is None:
+        return None
+    cleaned = t.strip().lstrip("#").lower()
+    return cleaned or None
 
 
-def _normalize_tags(tags: Iterable[str] | None) -> list[str]:
-    if not tags:
-        return []
-    seen: set[str] = set()
-    out: list[str] = []
-    for raw in tags:
-        n = normalize_tag(raw)
-        if n and n not in seen:
-            seen.add(n)
-            out.append(n)
-    return out
-
+# --- Time / row helpers -----------------------------------------------------
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _fetch_tags(conn: sqlite3.Connection, note_id: int) -> list[str]:
-    rows = conn.execute(
-        "SELECT tag FROM tags WHERE note_id = ? ORDER BY tag",
-        (note_id,),
-    ).fetchall()
-    return [r["tag"] for r in rows]
-
-
-def _insert_tags(conn: sqlite3.Connection, note_id: int, tags: list[str]) -> None:
-    if not tags:
-        return
-    conn.executemany(
-        "INSERT OR IGNORE INTO tags(note_id, tag) VALUES (?, ?)",
-        [(note_id, t) for t in tags],
-    )
-
-
-def _row_to_note(row: sqlite3.Row, tags: list[str]) -> Note:
+def _row_to_note(row: sqlite3.Row) -> Note:
     return Note(
         id=row["id"],
         title=row["title"],
-        body=row["body"],
-        tags=tags,
+        description=row["description"],
+        tag=row["tag"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
 
 
-def _row_to_summary(row: sqlite3.Row, tags: list[str]) -> NoteSummary:
+def _row_to_summary(row: sqlite3.Row, similarity: float | None = None) -> NoteSummary:
     return NoteSummary(
         id=row["id"],
         title=row["title"],
-        snippet=row["snippet"],
-        tags=tags,
+        description=row["description"],
+        tag=row["tag"],
         updated_at=row["updated_at"],
+        similarity=similarity,
     )
 
 
-def create_note(title: str, body: str, tags: list[str] | None = None) -> Note:
+# --- Embedding persistence --------------------------------------------------
+
+def _compose_embed_input(title: str, description: str) -> str:
+    return f"{title}\n\n{description}"
+
+
+def _try_embed(title: str, description: str) -> tuple[bytes | None, str | None]:
+    """Return (blob, timestamp) for the note's embedding, or (None, None) if
+    the embedding service is down. Notes with missing embeddings are skipped
+    by semantic search and re-tried on the next write or backfill pass.
+    """
+    try:
+        vec = embeddings.embed(_compose_embed_input(title, description))
+        return embeddings.to_blob(vec), _utc_now_iso()
+    except Exception as e:
+        logger.warning("Embedding failed for note: %s", e)
+        return None, None
+
+
+# --- CRUD -------------------------------------------------------------------
+
+def create_note(title: str, description: str, tag: str | None = None) -> Note:
     now = _utc_now_iso()
-    norm = _normalize_tags(tags)
+    norm_tag = normalize_tag(tag)
+    embedding_blob, embedding_ts = _try_embed(title, description)
+
     with tx() as conn:
         cur = conn.execute(
-            "INSERT INTO notes(title, body, created_at, updated_at) VALUES (?, ?, ?, ?)",
-            (title, body, now, now),
+            """
+            INSERT INTO notes(title, description, tag, embedding, embedding_updated_at,
+                              created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (title, description, norm_tag, embedding_blob, embedding_ts, now, now),
         )
         note_id = int(cur.lastrowid)
-        _insert_tags(conn, note_id, norm)
         row = conn.execute(
-            "SELECT id, title, body, created_at, updated_at FROM notes WHERE id = ?",
+            "SELECT id, title, description, tag, created_at, updated_at "
+            "FROM notes WHERE id = ?",
             (note_id,),
         ).fetchone()
-        stored_tags = _fetch_tags(conn, note_id)
-    return _row_to_note(row, stored_tags)
+    return _row_to_note(row)
 
 
 def get_note(note_id: int) -> Note | None:
     with tx() as conn:
         row = conn.execute(
-            "SELECT id, title, body, created_at, updated_at FROM notes WHERE id = ?",
+            "SELECT id, title, description, tag, created_at, updated_at "
+            "FROM notes WHERE id = ?",
             (note_id,),
         ).fetchone()
-        if row is None:
-            return None
-        tags = _fetch_tags(conn, note_id)
-    return _row_to_note(row, tags)
+    return _row_to_note(row) if row else None
 
 
 def update_note(
     note_id: int,
     title: str | None = None,
-    body: str | None = None,
-    tags: list[str] | None = None,
+    description: str | None = None,
+    tag: str | None = None,
+    *,
+    clear_tag: bool = False,
 ) -> Note | None:
+    """Patch an existing note. `clear_tag=True` explicitly sets tag to NULL
+    (distinguishes 'don't touch tag' from 'remove tag')."""
     with tx() as conn:
         existing = conn.execute(
-            "SELECT id FROM notes WHERE id = ?", (note_id,)
+            "SELECT title, description FROM notes WHERE id = ?", (note_id,)
         ).fetchone()
         if existing is None:
             return None
@@ -115,31 +128,49 @@ def update_note(
         if title is not None:
             set_clauses.append("title = ?")
             args.append(title)
-        if body is not None:
-            set_clauses.append("body = ?")
-            args.append(body)
+        if description is not None:
+            set_clauses.append("description = ?")
+            args.append(description)
+        if clear_tag:
+            set_clauses.append("tag = NULL")
+        elif tag is not None:
+            set_clauses.append("tag = ?")
+            args.append(normalize_tag(tag))
 
-        anything_changed = bool(set_clauses) or tags is not None
-        if anything_changed:
-            set_clauses.append("updated_at = ?")
-            args.append(_utc_now_iso())
-            args.append(note_id)
-            conn.execute(
-                f"UPDATE notes SET {', '.join(set_clauses)} WHERE id = ?",
-                args,
-            )
+        # If title or description changed, re-embed. Tag-only edits don't move
+        # the semantic needle, so we skip embedding work on those.
+        text_changed = title is not None or description is not None
+        if text_changed:
+            new_title = title if title is not None else existing["title"]
+            new_desc = description if description is not None else existing["description"]
+            blob, ts = _try_embed(new_title, new_desc)
+            set_clauses.append("embedding = ?")
+            args.append(blob)
+            set_clauses.append("embedding_updated_at = ?")
+            args.append(ts)
 
-        if tags is not None:
-            norm = _normalize_tags(tags)
-            conn.execute("DELETE FROM tags WHERE note_id = ?", (note_id,))
-            _insert_tags(conn, note_id, norm)
+        if not set_clauses:
+            # No-op patch — return the current row unchanged.
+            row = conn.execute(
+                "SELECT id, title, description, tag, created_at, updated_at "
+                "FROM notes WHERE id = ?",
+                (note_id,),
+            ).fetchone()
+            return _row_to_note(row)
 
+        set_clauses.append("updated_at = ?")
+        args.append(_utc_now_iso())
+        args.append(note_id)
+        conn.execute(
+            f"UPDATE notes SET {', '.join(set_clauses)} WHERE id = ?",
+            args,
+        )
         row = conn.execute(
-            "SELECT id, title, body, created_at, updated_at FROM notes WHERE id = ?",
+            "SELECT id, title, description, tag, created_at, updated_at "
+            "FROM notes WHERE id = ?",
             (note_id,),
         ).fetchone()
-        final_tags = _fetch_tags(conn, note_id)
-    return _row_to_note(row, final_tags)
+    return _row_to_note(row)
 
 
 def delete_note(note_id: int) -> bool:
@@ -148,74 +179,125 @@ def delete_note(note_id: int) -> bool:
         return cur.rowcount > 0
 
 
-def list_recent(limit: int = 5) -> list[NoteSummary]:
+# --- Listing / tag queries --------------------------------------------------
+
+def list_notes(tag: str | None = None, limit: int = 10) -> list[NoteSummary]:
+    norm_tag = normalize_tag(tag) if tag else None
+    with tx() as conn:
+        if norm_tag is not None:
+            rows = conn.execute(
+                """
+                SELECT id, title, description, tag, updated_at
+                FROM notes WHERE tag = ?
+                ORDER BY updated_at DESC LIMIT ?
+                """,
+                (norm_tag, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, title, description, tag, updated_at
+                FROM notes ORDER BY updated_at DESC LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [_row_to_summary(r) for r in rows]
+
+
+def list_tags(limit: int = 4) -> list[TagCount]:
+    """Return the top-N tags by usage count. Used by add-note flow to suggest
+    reusing an existing tag."""
     with tx() as conn:
         rows = conn.execute(
             """
-            SELECT id, title, substr(body, 1, 200) AS snippet, updated_at
+            SELECT tag, COUNT(*) AS c
             FROM notes
-            ORDER BY updated_at DESC
+            WHERE tag IS NOT NULL
+            GROUP BY tag
+            ORDER BY c DESC, tag ASC
             LIMIT ?
             """,
             (limit,),
         ).fetchall()
-        return [_row_to_summary(r, _fetch_tags(conn, r["id"])) for r in rows]
+    return [TagCount(tag=r["tag"], count=r["c"]) for r in rows]
 
 
-def search_notes(
-    query: str | None = None,
-    tags: list[str] | None = None,
-    date_from: datetime | None = None,
-    date_to: datetime | None = None,
-    limit: int = 10,
-) -> list[NoteSummary]:
-    norm_tags = _normalize_tags(tags)
+# --- Semantic search --------------------------------------------------------
 
-    where: list[str] = []
-    args: list = []
-    joins: list[str] = []
+def search_semantic(
+    query: str,
+    limit: int = 5,
+    threshold: float | None = None,
+    fallback_limit: int | None = None,
+) -> tuple[list[NoteSummary], bool]:
+    """Rank notes by cosine similarity to `query`.
 
-    if query:
-        joins.append("JOIN notes_fts f ON f.rowid = n.id")
-        where.append("notes_fts MATCH ?")
-        args.append(_to_fts_query(query))
-
-    if norm_tags:
-        joins.append("JOIN tags t ON t.note_id = n.id")
-        placeholders = ",".join("?" * len(norm_tags))
-        where.append(f"t.tag IN ({placeholders})")
-        args.extend(norm_tags)
-
-    if date_from is not None:
-        where.append("n.created_at >= ?")
-        args.append(date_from.isoformat())
-    if date_to is not None:
-        where.append("n.created_at <= ?")
-        args.append(date_to.isoformat())
-
-    join_clause = " ".join(joins)
-    where_clause = ("WHERE " + " AND ".join(where)) if where else ""
-
-    sql = f"""
-        SELECT DISTINCT n.id, n.title, substr(n.body, 1, 200) AS snippet, n.updated_at
-        FROM notes n
-        {join_clause}
-        {where_clause}
-        ORDER BY n.updated_at DESC
-        LIMIT ?
+    Returns `(results, above_threshold)`:
+      - If any notes score >= threshold → returns those notes (up to `limit`),
+        `above_threshold=True`.
+      - Else if notes exist with embeddings → returns the top
+        `fallback_limit` by similarity (all below threshold),
+        `above_threshold=False`. The dispatcher labels these as
+        "no strong match" so the LLM reports honestly.
+      - Else → returns `([], False)` (no embedded notes at all).
     """
-    args.append(limit)
+    if threshold is None:
+        threshold = settings.search_threshold
+    if fallback_limit is None:
+        fallback_limit = settings.search_fallback_limit
+
+    q_vec = embeddings.embed(query)
 
     with tx() as conn:
-        rows = conn.execute(sql, args).fetchall()
-        return [_row_to_summary(r, _fetch_tags(conn, r["id"])) for r in rows]
+        rows = conn.execute(
+            """
+            SELECT id, title, description, tag, embedding, updated_at
+            FROM notes WHERE embedding IS NOT NULL
+            """
+        ).fetchall()
+
+    if not rows:
+        return [], False
+
+    scored: list[tuple[float, sqlite3.Row]] = []
+    for r in rows:
+        v = embeddings.from_blob(r["embedding"])
+        sim = embeddings.cosine(q_vec, v)
+        scored.append((sim, r))
+    scored.sort(key=lambda x: -x[0])
+
+    above = [t for t in scored if t[0] >= threshold]
+    if above:
+        return [_row_to_summary(r, similarity=s) for s, r in above[:limit]], True
+
+    # Best-effort fallback: no note cleared the bar, so surface the closest few
+    # anyway. The dispatcher message flags these as low-confidence so the LLM
+    # presents them as "here are the closest I have" rather than real matches.
+    return [_row_to_summary(r, similarity=s) for s, r in scored[:fallback_limit]], False
 
 
-def _to_fts_query(query: str) -> str:
-    # Quote each token so FTS5 treats them as literal terms (escapes punctuation
-    # that would otherwise be interpreted as FTS operators like - + * " : ( ) ).
-    tokens = [t for t in query.split() if t]
-    if not tokens:
-        return '""'
-    safe = [f'"{t.replace(chr(34), chr(34) * 2)}"' for t in tokens]
-    return " ".join(safe)
+# --- Backfill ---------------------------------------------------------------
+
+def backfill_embeddings() -> int:
+    """Embed every note that doesn't yet have an embedding. Returns the count.
+    Called once on app startup. Safe to run repeatedly — idempotent."""
+    with tx() as conn:
+        rows = conn.execute(
+            "SELECT id, title, description FROM notes WHERE embedding IS NULL"
+        ).fetchall()
+
+    filled = 0
+    for r in rows:
+        blob, ts = _try_embed(r["title"], r["description"])
+        if blob is None:
+            logger.warning("Backfill skipped note %d — embedding unavailable", r["id"])
+            continue
+        with tx() as conn:
+            conn.execute(
+                "UPDATE notes SET embedding = ?, embedding_updated_at = ? WHERE id = ?",
+                (blob, ts, r["id"]),
+            )
+        filled += 1
+    if filled:
+        logger.info("Backfilled embeddings for %d note(s)", filled)
+    return filled

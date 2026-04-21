@@ -1,41 +1,64 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 
-# --- Tool argument models -----------------------------------------------------
-#
-# One model per user-facing intent. Each model is the single source of truth
-# for what the LLM is allowed to send us for that tool.
+def _coerce_json_list(v: Any) -> Any:
+    """Accept a JSON-encoded string as a list.
+
+    Small models sometimes emit list arguments as a JSON-encoded string
+    (e.g. `"[\\"work\\"]"`). Rather than fail the tool + retry, we parse the
+    string back into the list the model intended. Non-string or non-JSON
+    input is returned unchanged so the normal validators still run.
+    """
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+        except json.JSONDecodeError:
+            return v
+        if isinstance(parsed, list):
+            return parsed
+    return v
+
+
+StrList = Annotated[list[str], BeforeValidator(_coerce_json_list)]
+
+
+# --- Tool argument models ---------------------------------------------------
 
 class AddNoteArgs(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
-    body: str = Field(..., min_length=1)
-    tags: list[str] = Field(default_factory=list, max_length=20)
+    description: str = Field(..., min_length=1)
+    tag: str | None = Field(default=None, max_length=50)
+    confirm: bool = Field(
+        default=False,
+        description=(
+            "Must be true for the save to commit. First call with confirm=false "
+            "to get a preview + needs_confirmation response; only call again with "
+            "confirm=true after the user has explicitly agreed."
+        ),
+    )
+
+
+class ListNotesArgs(BaseModel):
+    tag: str | None = Field(
+        default=None,
+        description="Optional tag filter. When set, returns notes with this tag only.",
+    )
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+class ListTagsArgs(BaseModel):
+    limit: int = Field(default=4, ge=1, le=20)
 
 
 class SearchNotesArgs(BaseModel):
-    query: str | None = Field(
-        default=None,
-        description="Keyword or natural-language query. Matched against title + body via FTS5.",
-    )
-    tags: list[str] = Field(default_factory=list, max_length=20)
-    date_from: datetime | None = Field(
-        default=None,
-        description="Only return notes created at or after this ISO-8601 timestamp.",
-    )
-    date_to: datetime | None = Field(
-        default=None,
-        description="Only return notes created at or before this ISO-8601 timestamp.",
-    )
-    limit: int = Field(default=10, ge=1, le=50)
-    semantic: bool = Field(
-        default=False,
-        description="Use vector similarity instead of keyword search (bonus feature).",
-    )
+    query: str = Field(..., min_length=1, description="Natural-language query for semantic search.")
+    limit: int = Field(default=5, ge=1, le=20)
 
 
 class GetNoteArgs(BaseModel):
@@ -45,8 +68,20 @@ class GetNoteArgs(BaseModel):
 class UpdateNoteArgs(BaseModel):
     note_id: int = Field(..., ge=1)
     title: str | None = Field(default=None, min_length=1, max_length=200)
-    body: str | None = Field(default=None, min_length=1)
-    tags: list[str] | None = Field(default=None, max_length=20)
+    description: str | None = Field(default=None, min_length=1)
+    tag: str | None = Field(default=None, max_length=50)
+    clear_tag: bool = Field(
+        default=False,
+        description="Set true to explicitly remove the note's tag (distinct from 'leave tag alone').",
+    )
+    confirm: bool = Field(
+        default=False,
+        description=(
+            "Must be true for the patch to commit. First call with confirm=false "
+            "to get a preview of the updated fields + needs_confirmation response; "
+            "only call again with confirm=true after the user has explicitly agreed."
+        ),
+    )
 
 
 class DeleteNoteArgs(BaseModel):
@@ -54,28 +89,13 @@ class DeleteNoteArgs(BaseModel):
     confirm: bool = Field(
         default=False,
         description=(
-            "Must be true for the deletion to proceed. First call with confirm=false "
+            "Must be true for deletion to proceed. First call with confirm=false "
             "to preview; only pass confirm=true after the user has explicitly agreed."
         ),
     )
 
 
-class ListRecentArgs(BaseModel):
-    limit: int = Field(default=5, ge=1, le=50)
-
-
-class SummarizeNotesArgs(BaseModel):
-    note_ids: list[int] = Field(..., min_length=1, max_length=20)
-
-
-# --- Uniform tool result envelope --------------------------------------------
-#
-# Every tool call the LLM makes comes back as one of these. Keeping the shape
-# uniform lets the system prompt teach the model a single pattern:
-#   if ok:       use data
-#   elif needs_confirmation: ask the user
-#   elif candidates:         disambiguate with the user
-#   else:                    explain the error in plain English.
+# --- Uniform tool result envelope ------------------------------------------
 
 ErrorCode = Literal[
     "not_found",
@@ -95,11 +115,7 @@ class ToolResult(BaseModel):
     error_code: ErrorCode | None = None
 
 
-# --- Ollama tool descriptors -------------------------------------------------
-#
-# Ollama accepts OpenAI-style function specs. We derive them from the Pydantic
-# models so the JSON schema stays in lockstep with the Python types. The
-# descriptions are LLM-facing prompt surface — keep them tight and action-oriented.
+# --- Ollama tool descriptors -----------------------------------------------
 
 def _tool(name: str, description: str, args_model: type[BaseModel]) -> dict:
     return {
@@ -115,52 +131,76 @@ def _tool(name: str, description: str, args_model: type[BaseModel]) -> dict:
 TOOL_DEFS: list[dict] = [
     _tool(
         "add_note",
-        "Create a new note with a title, body, and optional tags.",
+        (
+            "Save a NEW note after the user has explicitly confirmed. "
+            "`title` and `description` are REQUIRED non-empty strings. `tag` "
+            "is OPTIONAL — omit it rather than guessing. Only call this tool "
+            "after presenting the proposed fields to the user in plain text "
+            "and receiving an affirmative confirmation ('yes', 'save it', "
+            "'confirm', etc.). Never call with empty or placeholder values."
+        ),
         AddNoteArgs,
+    ),
+    _tool(
+        "list_notes",
+        (
+            "List recent notes, optionally filtered by tag. Use for 'show my "
+            "notes', 'list all notes', 'what notes do I have', 'notes tagged "
+            "X'. Default limit=10, max=50. Pass `tag` to filter; omit for all."
+        ),
+        ListNotesArgs,
+    ),
+    _tool(
+        "list_tags",
+        (
+            "Return the top-N most-used tags in the user's notes. Use this "
+            "when the user is adding a note but hasn't specified a tag — "
+            "suggest the top 4 so they can reuse one, or pick 'skip'."
+        ),
+        ListTagsArgs,
     ),
     _tool(
         "search_notes",
         (
-            "Search notes by keyword, tags, and/or date range. "
-            "Returns compact summaries; call get_note for full contents."
+            "Semantic search over all notes by natural-language query. Matches "
+            "by MEANING, not exact words (handles typos and synonyms). Returns "
+            "up to `limit` notes ranked by similarity, filtered by a 0.5 "
+            "threshold. Use this for ANY free-text note lookup, reference "
+            "phrase ('the meeting note', 'my lunch note'), or when the user "
+            "describes a note they're looking for."
         ),
         SearchNotesArgs,
     ),
     _tool(
         "get_note",
-        "Fetch a single note's full contents by its id.",
+        (
+            "Fetch ONE note's full details by integer id. The id MUST come from "
+            "a prior tool result (search_notes, list_notes, list_tags, add_note). "
+            "NEVER invent an id."
+        ),
         GetNoteArgs,
     ),
     _tool(
         "update_note",
         (
-            "Patch a note's title, body, and/or tags. Only provide the fields you "
-            "want to change; omitted fields are left untouched. Passing tags "
-            "replaces the whole tag set."
+            "Patch an EXISTING note after the user has confirmed the proposed "
+            "changes. `note_id` MUST come from a prior tool result — NEVER "
+            "invent one. Only call after showing the user what the new fields "
+            "will be and receiving affirmative confirmation. Pass `clear_tag=true` "
+            "to remove a tag (distinct from omitting tag which leaves it alone)."
         ),
         UpdateNoteArgs,
     ),
     _tool(
         "delete_note",
         (
-            "Delete a note by id. First call with confirm=false to get a preview and "
-            "a needs_confirmation response; only call again with confirm=true after "
-            "the user has explicitly agreed."
+            "Delete a note by id. DESTRUCTIVE — two-step: first call with "
+            "`confirm=false` to get a preview, then ask the user plainly "
+            "('Delete note #N — [title]?'), then call again with "
+            "`confirm=true` after they say yes. The `note_id` MUST come from "
+            "a prior tool result."
         ),
         DeleteNoteArgs,
-    ),
-    _tool(
-        "list_recent",
-        "List the N most recently updated notes as summaries.",
-        ListRecentArgs,
-    ),
-    _tool(
-        "summarize_notes",
-        (
-            "Fetch several notes by id so the assistant can reason over their "
-            "contents (e.g. summarise, compare, find contradictions)."
-        ),
-        SummarizeNotesArgs,
     ),
 ]
 
@@ -170,10 +210,10 @@ TOOL_NAMES: set[str] = {t["function"]["name"] for t in TOOL_DEFS}
 
 ARG_MODELS: dict[str, type[BaseModel]] = {
     "add_note": AddNoteArgs,
+    "list_notes": ListNotesArgs,
+    "list_tags": ListTagsArgs,
     "search_notes": SearchNotesArgs,
     "get_note": GetNoteArgs,
     "update_note": UpdateNoteArgs,
     "delete_note": DeleteNoteArgs,
-    "list_recent": ListRecentArgs,
-    "summarize_notes": SummarizeNotesArgs,
 }

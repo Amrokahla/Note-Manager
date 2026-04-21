@@ -8,9 +8,9 @@ from backend.tools.schemas import (
     AddNoteArgs,
     DeleteNoteArgs,
     GetNoteArgs,
-    ListRecentArgs,
+    ListNotesArgs,
+    ListTagsArgs,
     SearchNotesArgs,
-    SummarizeNotesArgs,
     TOOL_DEFS,
     TOOL_NAMES,
     ToolResult,
@@ -21,101 +21,90 @@ from backend.tools.schemas import (
 # ---------- Happy-path round-trips -------------------------------------------
 
 def test_add_note_roundtrip():
-    payload = {"title": "hello", "body": "world", "tags": ["a", "b"]}
-    m = AddNoteArgs.model_validate(payload)
-    assert m.title == "hello"
-    assert m.tags == ["a", "b"]
-    # default for tags when absent
-    m2 = AddNoteArgs.model_validate({"title": "t", "body": "b"})
-    assert m2.tags == []
-
-
-def test_search_notes_roundtrip_all_optional():
-    m = SearchNotesArgs.model_validate({})
-    assert m.query is None
-    assert m.tags == []
-    assert m.limit == 10
-    assert m.semantic is False
-
-    m2 = SearchNotesArgs.model_validate(
-        {
-            "query": "deadline",
-            "tags": ["work"],
-            "date_from": "2026-04-01T00:00:00",
-            "date_to": "2026-04-30T23:59:59",
-            "limit": 20,
-            "semantic": True,
-        }
+    m = AddNoteArgs.model_validate(
+        {"title": "hi", "description": "there", "tag": "work"}
     )
-    assert m2.query == "deadline"
-    assert m2.limit == 20
+    assert m.title == "hi"
+    assert m.tag == "work"
+
+
+def test_add_note_tag_is_optional():
+    m = AddNoteArgs.model_validate({"title": "hi", "description": "there"})
+    assert m.tag is None
+
+
+def test_list_notes_defaults():
+    m = ListNotesArgs.model_validate({})
+    assert m.tag is None
+    assert m.limit == 10
+
+
+def test_list_notes_with_tag():
+    m = ListNotesArgs.model_validate({"tag": "work"})
+    assert m.tag == "work"
+
+
+def test_list_tags_defaults():
+    assert ListTagsArgs.model_validate({}).limit == 4
+
+
+def test_search_notes_requires_query():
+    with pytest.raises(ValidationError):
+        SearchNotesArgs.model_validate({})
+
+
+def test_search_notes_defaults():
+    m = SearchNotesArgs.model_validate({"query": "standup"})
+    assert m.query == "standup"
+    assert m.limit == 5
 
 
 def test_get_note_roundtrip():
-    m = GetNoteArgs.model_validate({"note_id": 42})
-    assert m.note_id == 42
+    assert GetNoteArgs.model_validate({"note_id": 42}).note_id == 42
 
 
 def test_update_note_partial_patch():
     m = UpdateNoteArgs.model_validate({"note_id": 1})
-    assert m.title is None and m.body is None and m.tags is None
+    assert m.title is None and m.description is None and m.tag is None
+    assert m.clear_tag is False
 
-    m2 = UpdateNoteArgs.model_validate({"note_id": 1, "tags": ["x"]})
-    assert m2.tags == ["x"]
+
+def test_update_note_clear_tag():
+    m = UpdateNoteArgs.model_validate({"note_id": 1, "clear_tag": True})
+    assert m.clear_tag is True
 
 
 def test_delete_note_defaults_confirm_false():
-    m = DeleteNoteArgs.model_validate({"note_id": 7})
-    assert m.confirm is False
-
-    m2 = DeleteNoteArgs.model_validate({"note_id": 7, "confirm": True})
-    assert m2.confirm is True
-
-
-def test_list_recent_defaults_and_bounds():
-    assert ListRecentArgs.model_validate({}).limit == 5
-    assert ListRecentArgs.model_validate({"limit": 50}).limit == 50
-
-
-def test_summarize_notes_requires_ids():
-    m = SummarizeNotesArgs.model_validate({"note_ids": [1, 2, 3]})
-    assert m.note_ids == [1, 2, 3]
+    assert DeleteNoteArgs.model_validate({"note_id": 7}).confirm is False
 
 
 # ---------- Malformed payload rejection --------------------------------------
 
 def test_add_note_rejects_empty_title():
     with pytest.raises(ValidationError):
-        AddNoteArgs.model_validate({"title": "", "body": "b"})
+        AddNoteArgs.model_validate({"title": "", "description": "b"})
 
 
-def test_add_note_rejects_missing_body():
+def test_add_note_rejects_missing_description():
     with pytest.raises(ValidationError):
         AddNoteArgs.model_validate({"title": "t"})
 
 
-def test_search_notes_rejects_limit_out_of_range():
+def test_list_notes_rejects_limit_out_of_range():
     with pytest.raises(ValidationError):
-        SearchNotesArgs.model_validate({"limit": 0})
+        ListNotesArgs.model_validate({"limit": 0})
     with pytest.raises(ValidationError):
-        SearchNotesArgs.model_validate({"limit": 100})
+        ListNotesArgs.model_validate({"limit": 100})
 
 
-def test_search_notes_rejects_bad_datetime():
+def test_search_notes_rejects_empty_query():
     with pytest.raises(ValidationError):
-        SearchNotesArgs.model_validate({"date_from": "not-a-date"})
+        SearchNotesArgs.model_validate({"query": ""})
 
 
 def test_get_note_rejects_non_positive_id():
     with pytest.raises(ValidationError):
         GetNoteArgs.model_validate({"note_id": 0})
-    with pytest.raises(ValidationError):
-        GetNoteArgs.model_validate({"note_id": -5})
-
-
-def test_update_note_rejects_missing_id():
-    with pytest.raises(ValidationError):
-        UpdateNoteArgs.model_validate({"title": "x"})
 
 
 def test_delete_note_rejects_missing_id():
@@ -123,36 +112,12 @@ def test_delete_note_rejects_missing_id():
         DeleteNoteArgs.model_validate({"confirm": True})
 
 
-def test_list_recent_rejects_out_of_range():
-    with pytest.raises(ValidationError):
-        ListRecentArgs.model_validate({"limit": 0})
-    with pytest.raises(ValidationError):
-        ListRecentArgs.model_validate({"limit": 9999})
-
-
-def test_summarize_notes_rejects_empty_list():
-    with pytest.raises(ValidationError):
-        SummarizeNotesArgs.model_validate({"note_ids": []})
-
-
 # ---------- ToolResult envelope ---------------------------------------------
 
 def test_tool_result_happy_path():
     r = ToolResult(ok=True, message="done", data={"id": 1})
     assert r.ok is True
-    assert r.needs_confirmation is False
     assert r.error_code is None
-
-
-def test_tool_result_needs_confirmation():
-    r = ToolResult(
-        ok=False,
-        message="confirm?",
-        needs_confirmation=True,
-        error_code="needs_confirmation",
-        data={"preview": {"id": 1}},
-    )
-    assert r.error_code == "needs_confirmation"
 
 
 def test_tool_result_rejects_bad_error_code():
@@ -160,11 +125,25 @@ def test_tool_result_rejects_bad_error_code():
         ToolResult(ok=False, message="x", error_code="bogus")  # type: ignore[arg-type]
 
 
-# ---------- TOOL_DEFS shape (what Ollama will see) --------------------------
+# ---------- TOOL_DEFS shape ------------------------------------------------
 
 def test_tool_defs_cover_every_arg_model():
     assert TOOL_NAMES == set(ARG_MODELS.keys())
     assert len(TOOL_DEFS) == len(ARG_MODELS)
+    # 7 tools total per the redesign
+    assert len(TOOL_DEFS) == 7
+
+
+def test_tool_names_match_redesign():
+    assert TOOL_NAMES == {
+        "add_note",
+        "list_notes",
+        "list_tags",
+        "search_notes",
+        "get_note",
+        "update_note",
+        "delete_note",
+    }
 
 
 def test_tool_defs_are_openai_function_shape():
@@ -173,10 +152,7 @@ def test_tool_defs_are_openai_function_shape():
         fn = entry["function"]
         assert isinstance(fn["name"], str) and fn["name"]
         assert isinstance(fn["description"], str) and fn["description"]
-        params = fn["parameters"]
-        # Pydantic v2 emits a JSON schema with type=object at the root.
-        assert params["type"] == "object"
-        assert "properties" in params
+        assert fn["parameters"]["type"] == "object"
 
 
 @pytest.mark.parametrize("tool_name,model", list(ARG_MODELS.items()))

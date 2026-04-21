@@ -7,40 +7,30 @@ from typing import Iterator
 
 from backend.config import settings
 
+# Single-table schema. One tag per note (denormalized — user-requested design).
+# Embeddings live in-row as packed float32 bytes; NULL means "not yet embedded"
+# so the backfill pass on startup has a trivial WHERE clause.
+#
+# Why no FTS5: semantic search via nomic-embed-text supersedes keyword matching
+# for free-text. Tag queries are plain WHERE clauses, no FTS needed.
+
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS notes (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  title      TEXT    NOT NULL,
-  body       TEXT    NOT NULL,
-  created_at TEXT    NOT NULL,
-  updated_at TEXT    NOT NULL
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  title                 TEXT    NOT NULL,
+  description           TEXT    NOT NULL,
+  tag                   TEXT,
+  embedding             BLOB,
+  embedding_updated_at  TEXT,
+  created_at            TEXT    NOT NULL,
+  updated_at            TEXT    NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS tags (
-  note_id INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
-  tag     TEXT    NOT NULL,
-  PRIMARY KEY (note_id, tag)
-);
-CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
+CREATE INDEX IF NOT EXISTS idx_notes_tag
+  ON notes(tag) WHERE tag IS NOT NULL;
 
-CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts
-USING fts5(title, body, content='notes', content_rowid='id');
-
-CREATE TRIGGER IF NOT EXISTS notes_ai AFTER INSERT ON notes BEGIN
-  INSERT INTO notes_fts(rowid, title, body) VALUES (new.id, new.title, new.body);
-END;
-
-CREATE TRIGGER IF NOT EXISTS notes_ad AFTER DELETE ON notes BEGIN
-  INSERT INTO notes_fts(notes_fts, rowid, title, body)
-    VALUES ('delete', old.id, old.title, old.body);
-END;
-
-CREATE TRIGGER IF NOT EXISTS notes_au AFTER UPDATE ON notes BEGIN
-  INSERT INTO notes_fts(notes_fts, rowid, title, body)
-    VALUES ('delete', old.id, old.title, old.body);
-  INSERT INTO notes_fts(rowid, title, body)
-    VALUES (new.id, new.title, new.body);
-END;
+CREATE INDEX IF NOT EXISTS idx_notes_updated_at
+  ON notes(updated_at DESC);
 """
 
 

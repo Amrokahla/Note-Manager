@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from backend.agent import llm_handler
 from backend.agent.conversation_state import (
@@ -36,6 +38,76 @@ class TurnToolCall:
 class TurnResult:
     reply: str
     tool_calls: list[TurnToolCall] = field(default_factory=list)
+
+
+# Emit callback used by the SSE streaming endpoint to surface each stage of
+# the loop in real time. The string keys match FRONTEND_PLAN §4.2 verbatim so
+# the server's `event:` line is the same token the frontend switches on.
+EmitFunc = Callable[[str, dict], None]
+
+
+def _result_status(result: ToolResult) -> str:
+    if result.needs_confirmation:
+        return "needs_confirmation"
+    if result.ok:
+        return "ok"
+    return "fail"
+
+
+def _result_payload(tc_id: str, result: ToolResult) -> dict[str, Any]:
+    return {
+        "id": tc_id,
+        "status": _result_status(result),
+        "message": result.message,
+        "error_code": result.error_code,
+        "data": result.data,
+        "needs_confirmation": result.needs_confirmation,
+        "candidates": result.candidates,
+    }
+
+
+# --- Intent gate ------------------------------------------------------------
+#
+# llama3.2 at 3B can't resist firing a tool when tools are in its context,
+# even for "hi". The system prompt steers the reply text but not the decision
+# to call. To fix that at the source we simply don't GIVE the model tools when
+# the user's input clearly isn't a note operation — `tools=[]` removes the
+# temptation entirely.
+#
+# Heuristic: look for a note-related keyword token. We err toward "note op"
+# when uncertain (false negatives = missed tool calls the user has to rephrase
+# for; false positives = a chatty reply plus maybe one spurious tool call that
+# the prompt rules still moderate). That's the cheaper failure mode.
+
+_NOTE_KEYWORD_PATTERN = re.compile(
+    r"\b("
+    # Write / mutate
+    r"note|notes|notebook|notepad|jot|save|store|record|write|writes|wrote|"
+    r"add|adds|added|create|creates|created|"
+    r"remember|rememb|reminder|reminders|todo|to-do|task|tasks|"
+    r"update|updates|updated|edit|edits|edited|change|changes|changed|modify|modified|"
+    r"append|appends|amend|rename|renamed|"
+    r"delete|deletes|deleted|remove|removes|removed|clear|clears|drop|drops|trash|"
+    # Tag vocabulary (for list_tags / list_notes by tag)
+    r"tag|tags|tagged|untag|untagged|category|categories|"
+    # Read
+    r"show|shows|showed|list|lists|listed|recent|find|finds|found|search|searches|"
+    r"searched|look|looks|looked|looking|lookup|get|gets|fetch|fetched|open|opens|"
+    r"read|reads|summar[iy]s?e|summar[iy]sed|summary|summaries|recall|recalled"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_note_op(text: str) -> bool:
+    """Return True if `text` plausibly asks for a note operation.
+
+    When False, the orchestrator sends the LLM a tools=[] payload so the model
+    is forced to respond as plain chat. The system prompt still steers the
+    reply shape (warm greeting / polite refusal).
+    """
+    return bool(_NOTE_KEYWORD_PATTERN.search(text))
+
 
 # One store per process. The SessionStore interface is tiny on purpose so we
 # can swap this for a Redis-backed implementation later without touching the
@@ -95,26 +167,51 @@ def _run_tool_call(state: SessionState, call: ToolCall) -> ToolResult:
     return result
 
 
-def handle_user_message(session_id: str, user_text: str) -> TurnResult:
+def handle_user_message(
+    session_id: str,
+    user_text: str,
+    emit: EmitFunc | None = None,
+) -> TurnResult:
     """Run one user turn through the agent loop.
 
-    Returns a TurnResult with the assistant's reply and every tool call that
-    fired during this turn (so the HTTP layer can render them in the UI's
-    tool panel). Bounded by settings.max_tool_hops — if the LLM never emits a
-    plain message within that many hops we return a fallback reply, never an
-    infinite loop.
+    Returns a TurnResult (used by the non-streaming `/chat` endpoint and tests).
+    If `emit` is provided, also pushes progressive events to it — used by the
+    SSE `/chat/stream` endpoint so the UI can animate tool cards as each tool
+    is dispatched. Event names match FRONTEND_PLAN §4.2 exactly.
+
+    Bounded by settings.max_tool_hops — if the LLM never emits a plain message
+    within that many hops we return a fallback reply, never an infinite loop.
     """
+    _emit: EmitFunc = emit or (lambda _t, _d: None)
+
     state = store.get(session_id)
     state.messages.append({"role": "user", "content": user_text})
+    _emit("user_echo", {"message": user_text})
+
+    # Intent gate: decide *once per turn* whether to expose tools to the LLM.
+    # If the message doesn't look like a note operation we pass tools=[] so
+    # the model physically can't fire a tool — kills 3B's reflexive tool use
+    # on greetings and off-topic chat.
+    allow_tools = looks_like_note_op(user_text) or bool(state.pending_confirmation)
+    tools_for_turn: list[dict] | None = None if allow_tools else []
+    if not allow_tools:
+        logger.info(
+            "Intent gate: tools disabled for session %s (message=%r)",
+            session_id,
+            user_text,
+        )
+
     turn_calls: list[TurnToolCall] = []
 
     for _ in range(settings.max_tool_hops):
         messages = _build_messages(state)
-        resp = llm_handler.chat(messages)
+        resp = llm_handler.chat(messages, tools=tools_for_turn)
 
         if resp.kind == "message":
             reply = resp.content or ""
             state.messages.append({"role": "assistant", "content": reply})
+            _emit("assistant", {"content": reply})
+            _emit("done", {})
             return TurnResult(reply=reply, tool_calls=turn_calls)
 
         if not resp.tool_calls:
@@ -122,10 +219,21 @@ def handle_user_message(session_id: str, user_text: str) -> TurnResult:
             break
 
         for call in resp.tool_calls:
+            tc_id = f"tc-{uuid.uuid4().hex[:8]}"
+            _emit(
+                "tool_call",
+                {
+                    "id": tc_id,
+                    "name": call.name,
+                    "arguments": call.arguments,
+                    "status": "running",
+                },
+            )
             result = _run_tool_call(state, call)
+            _emit("tool_result", _result_payload(tc_id, result))
             turn_calls.append(
                 TurnToolCall(
-                    id=f"tc-{uuid.uuid4().hex[:8]}",
+                    id=tc_id,
                     name=call.name,
                     arguments=call.arguments,
                     result=result,
@@ -134,6 +242,8 @@ def handle_user_message(session_id: str, user_text: str) -> TurnResult:
 
     logger.warning("Hit MAX_TOOL_HOPS on session %s", session_id)
     state.messages.append({"role": "assistant", "content": _FALLBACK_REPLY})
+    _emit("assistant", {"content": _FALLBACK_REPLY})
+    _emit("done", {})
     return TurnResult(reply=_FALLBACK_REPLY, tool_calls=turn_calls)
 
 

@@ -15,7 +15,9 @@ export type Action =
     }
   | { type: "STREAM_START" }
   | { type: "STREAM_END" }
+  | { type: "STREAM_DROP" }
   | { type: "ERROR"; message: string }
+  | { type: "DISMISS_ERROR" }
   | { type: "RESET" };
 
 // The initial state is intentionally deterministic — sessionId is empty.
@@ -94,8 +96,29 @@ export function appReducer(state: AppState, action: Action): AppState {
     case "STREAM_END":
       return { ...state, isStreaming: false };
 
+    case "STREAM_DROP":
+      // Connection died mid-turn. Flip every card that was still "running"
+      // to "fail" so the UI doesn't leave a stale spinner behind.
+      return {
+        ...state,
+        toolCalls: state.toolCalls.map((tc) =>
+          tc.status === "running"
+            ? {
+                ...tc,
+                status: "fail",
+                message: "Connection lost",
+                endedAt: Date.now(),
+                durationMs: Date.now() - tc.startedAt,
+              }
+            : tc,
+        ),
+      };
+
     case "ERROR":
       return { ...state, isStreaming: false, error: action.message };
+
+    case "DISMISS_ERROR":
+      return { ...state, error: undefined };
 
     case "RESET":
       // Fired from a click handler — always client-side, so generating a

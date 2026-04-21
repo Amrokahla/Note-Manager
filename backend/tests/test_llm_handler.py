@@ -37,7 +37,7 @@ def test_chat_returns_tool_calls_when_message_has_tool_calls(fake_client):
             "tool_calls": [
                 {
                     "function": {
-                        "name": "list_recent",
+                        "name": "list_notes",
                         "arguments": {"limit": 3},
                     }
                 }
@@ -51,7 +51,7 @@ def test_chat_returns_tool_calls_when_message_has_tool_calls(fake_client):
     assert resp.kind == "tool_calls"
     assert len(resp.tool_calls) == 1
     call = resp.tool_calls[0]
-    assert call.name == "list_recent"
+    assert call.name == "list_notes"
     assert call.arguments == {"limit": 3}
 
 
@@ -131,12 +131,12 @@ def test_chat_repairs_flat_json_toolcall_from_content(fake_client):
     fake_client.canned = {
         "message": {
             "role": "assistant",
-            "content": '{"name": "list_recent", "arguments": {"limit": 2}}',
+            "content": '{"name": "list_notes", "arguments": {"limit": 2}}',
         }
     }
     resp = llm_handler.chat([])
     assert resp.kind == "tool_calls"
-    assert resp.tool_calls[0].name == "list_recent"
+    assert resp.tool_calls[0].name == "list_notes"
     assert resp.tool_calls[0].arguments == {"limit": 2}
 
 
@@ -179,16 +179,16 @@ def test_chat_ignores_json_with_unknown_tool_name(fake_client):
 # ---------- _try_parse_toolcall_from_text direct unit tests ----------------
 
 def test_parser_flat_shape():
-    result = _try_parse_toolcall_from_text('{"name": "add_note", "arguments": {"title": "t", "body": "b"}}')
+    result = _try_parse_toolcall_from_text('{"name": "add_note", "arguments": {"title": "t", "description": "b"}}')
     assert isinstance(result, ToolCall)
     assert result.name == "add_note"
-    assert result.arguments == {"title": "t", "body": "b"}
+    assert result.arguments == {"title": "t", "description": "b"}
 
 
 def test_parser_wrapped_shape():
-    result = _try_parse_toolcall_from_text('{"function": {"name": "list_recent", "arguments": {"limit": 5}}}')
+    result = _try_parse_toolcall_from_text('{"function": {"name": "list_notes", "arguments": {"limit": 5}}}')
     assert isinstance(result, ToolCall)
-    assert result.name == "list_recent"
+    assert result.name == "list_notes"
 
 
 def test_parser_handles_stringified_arguments_in_nested_shape():

@@ -1,16 +1,24 @@
 from __future__ import annotations
 
+import json
+import logging
+import queue
+import threading
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Iterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from ollama import Client
 from pydantic import BaseModel, Field
 
 from backend.agent import intent_parser
 from backend.config import settings
 from backend.db.sqlite import init_db
+from backend.services import note_service
+
+logger = logging.getLogger(__name__)
 
 ollama = Client(host=settings.ollama_host)
 
@@ -18,6 +26,12 @@ ollama = Client(host=settings.ollama_host)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Backfill embeddings for any notes missing one (e.g. added when Ollama
+    # was down, or from a pre-embedding schema). Cheap and idempotent.
+    try:
+        note_service.backfill_embeddings()
+    except Exception as e:
+        logger.warning("Startup backfill skipped: %s", e)
     yield
 
 
@@ -111,4 +125,56 @@ def chat(body: ChatIn) -> ChatOut:
             )
             for tc in turn.tool_calls
         ],
+    )
+
+
+# --- POST /chat/stream (SSE) ------------------------------------------------
+#
+# The orchestrator is synchronous (it blocks on ollama.Client.chat), so we run
+# it in a worker thread and bridge its `emit` callback through a thread-safe
+# queue into a sync generator that StreamingResponse drains into the HTTP
+# response body. The event names match FRONTEND_PLAN §4.2 exactly.
+
+def _format_sse(event_type: str, data: dict) -> str:
+    return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
+
+
+def _sse_stream(session_id: str, message: str) -> Iterator[str]:
+    q: queue.Queue[tuple[str, dict] | object] = queue.Queue()
+    sentinel = object()
+
+    def emit(event_type: str, data: dict) -> None:
+        q.put((event_type, data))
+
+    def run_orchestrator() -> None:
+        try:
+            intent_parser.handle_user_message(session_id, message, emit=emit)
+        except Exception as e:
+            logger.exception("Orchestrator crashed while streaming")
+            q.put(("error", {"message": f"{type(e).__name__}: {e}"}))
+        finally:
+            q.put(sentinel)
+
+    threading.Thread(target=run_orchestrator, daemon=True).start()
+
+    while True:
+        item = q.get()
+        if item is sentinel:
+            break
+        event_type, data = item  # type: ignore[misc]
+        yield _format_sse(event_type, data)
+
+
+@app.post("/chat/stream")
+def chat_stream(body: ChatIn) -> StreamingResponse:
+    return StreamingResponse(
+        _sse_stream(body.session_id, body.message),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Tell proxies not to buffer; without this, nginx/cloudflare hold
+            # the whole stream until it closes.
+            "X-Accel-Buffering": "no",
+        },
     )

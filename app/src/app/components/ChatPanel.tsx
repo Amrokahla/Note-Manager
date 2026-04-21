@@ -1,10 +1,12 @@
 "use client";
 
 import type { Dispatch } from "react";
+import { useRef } from "react";
 import { sendMessage } from "../lib/api";
 import type { Action } from "../lib/reducer";
 import type { AppState } from "../types";
 import Composer from "./Composer";
+import ErrorBanner from "./ErrorBanner";
 import MessageList from "./MessageList";
 
 interface Props {
@@ -13,19 +15,22 @@ interface Props {
 }
 
 export default function ChatPanel({ state, dispatch }: Props) {
-  async function handleSubmit(text: string) {
-    if (!state.sessionId) return; // wait for the mount-time INIT_SESSION
+  // Remember the last message we sent so Retry has something to re-submit.
+  // Kept in a ref (not state) because it shouldn't trigger re-renders.
+  const lastSent = useRef<string | null>(null);
+
+  async function submit(text: string) {
+    if (!state.sessionId) return;
 
     const turnId = crypto.randomUUID();
+    lastSent.current = text;
 
-    // Echo the user bubble immediately so the UI feels responsive; then kick
-    // off the backend round-trip. F3's SSE path will reuse the same handlers.
     dispatch({ type: "USER_MESSAGE", content: text, turnId });
     dispatch({ type: "STREAM_START" });
 
     await sendMessage(state.sessionId, text, turnId, {
       onUserEcho: () => {
-        /* already echoed above; no-op in F2 */
+        /* we already echoed above; noop keeps parity with F3 event flow */
       },
       onToolCall: (call) => dispatch({ type: "TOOL_CALL_START", call }),
       onToolResult: (r) =>
@@ -38,23 +43,32 @@ export default function ChatPanel({ state, dispatch }: Props) {
         }),
       onAssistant: (content) =>
         dispatch({ type: "ASSISTANT_MESSAGE", content, turnId }),
+      onStreamDrop: () => dispatch({ type: "STREAM_DROP" }),
       onDone: () => dispatch({ type: "STREAM_END" }),
       onError: (message) => dispatch({ type: "ERROR", message }),
     });
+  }
+
+  function handleRetry() {
+    if (state.isStreaming) return;
+    const text = lastSent.current;
+    if (!text) return;
+    dispatch({ type: "DISMISS_ERROR" });
+    submit(text);
   }
 
   return (
     <section className="flex min-h-0 flex-col">
       <MessageList messages={state.messages} />
       {state.error && (
-        <div
-          role="alert"
-          className="border-t border-rose-200 bg-rose-50 px-6 py-2 text-xs text-rose-700"
-        >
-          {state.error}
-        </div>
+        <ErrorBanner
+          message={state.error}
+          canRetry={!!lastSent.current && !state.isStreaming}
+          onRetry={handleRetry}
+          onDismiss={() => dispatch({ type: "DISMISS_ERROR" })}
+        />
       )}
-      <Composer disabled={state.isStreaming} onSubmit={handleSubmit} />
+      <Composer disabled={state.isStreaming} onSubmit={submit} />
     </section>
   );
 }

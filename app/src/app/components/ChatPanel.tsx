@@ -1,6 +1,7 @@
 "use client";
 
 import type { Dispatch } from "react";
+import { sendMessage } from "../lib/api";
 import type { Action } from "../lib/reducer";
 import type { AppState } from "../types";
 import Composer from "./Composer";
@@ -12,11 +13,32 @@ interface Props {
 }
 
 export default function ChatPanel({ state, dispatch }: Props) {
-  function handleSubmit(text: string) {
-    // F1: just echo the user turn locally so we can see it flow into the
-    // list. The real /chat call lands in F2.
+  async function handleSubmit(text: string) {
     const turnId = crypto.randomUUID();
+
+    // Echo the user bubble immediately so the UI feels responsive; then kick
+    // off the backend round-trip. F3's SSE path will reuse the same handlers.
     dispatch({ type: "USER_MESSAGE", content: text, turnId });
+    dispatch({ type: "STREAM_START" });
+
+    await sendMessage(state.sessionId, text, turnId, {
+      onUserEcho: () => {
+        /* already echoed above; no-op in F2 */
+      },
+      onToolCall: (call) => dispatch({ type: "TOOL_CALL_START", call }),
+      onToolResult: (r) =>
+        dispatch({
+          type: "TOOL_CALL_RESULT",
+          id: r.id,
+          status: r.status,
+          message: r.message,
+          errorCode: r.errorCode,
+        }),
+      onAssistant: (content) =>
+        dispatch({ type: "ASSISTANT_MESSAGE", content, turnId }),
+      onDone: () => dispatch({ type: "STREAM_END" }),
+      onError: (message) => dispatch({ type: "ERROR", message }),
+    });
   }
 
   return (

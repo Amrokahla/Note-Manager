@@ -4,20 +4,10 @@ import { useReducer } from "react";
 import ChatPanel from "./components/ChatPanel";
 import Header from "./components/Header";
 import ToolPanel from "./components/ToolPanel";
-import { mockInitialState } from "./lib/mockData";
-import { appReducer } from "./lib/reducer";
-import { newSessionId } from "./lib/session";
-
-// F1: seed the reducer with mock data so every UI state is visible before the
-// real /chat wiring lands in F2. Swap the initializer to `initialState()` from
-// ./lib/reducer when F2 comes online; the reducer itself is already wired for
-// live events.
-function seedInitialState() {
-  return mockInitialState(newSessionId());
-}
+import { appReducer, initialState } from "./lib/reducer";
 
 export default function Home() {
-  const [state, dispatch] = useReducer(appReducer, undefined, seedInitialState);
+  const [state, dispatch] = useReducer(appReducer, undefined, initialState);
 
   return (
     <main className="flex h-dvh flex-col">

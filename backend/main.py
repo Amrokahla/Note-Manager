@@ -27,8 +27,6 @@ ollama = Client(host=settings.ollama_host)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    # Backfill embeddings for any notes missing one (e.g. added when Ollama
-    # was down, or from a pre-embedding schema). Cheap and idempotent.
     try:
         note_service.backfill_embeddings()
     except Exception as e:
@@ -38,9 +36,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Note Agent", lifespan=lifespan)
 
-# CORS: the Next.js dev server runs on :3000 (or :3001 if occupied) and needs
-# to hit this API on :8000. Production deployment would tighten allow_origins
-# to the real host list.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -65,8 +60,7 @@ def _model_is_available(list_response: Any, target: str) -> bool:
 
 @app.get("/")
 def root():
-    """Friendly pointer so hitting :8000 directly doesn't look broken.
-    The UI lives in the separate Next.js app on :3000."""
+    """Friendly pointer; the UI lives on the Next.js app at :3000."""
     return {
         "service": "Note Agent API",
         "ui": "http://localhost:3000",
@@ -87,17 +81,9 @@ def health():
         return {"ok": False, "error": str(e), "model": settings.ollama_model}
 
 
-# --- POST /chat --------------------------------------------------------------
-#
-# Non-streaming endpoint consumed by the Next.js UI. Shape matches
-# FRONTEND_PLAN §4.1 exactly: { reply, tool_calls[{id, name, arguments, result}] }.
-# SSE streaming (FRONTEND_PLAN §4.2) is deferred until frontend F3.
-
 class ChatIn(BaseModel):
     session_id: str = Field(..., min_length=1)
     message: str = Field(..., min_length=1)
-    # Which LLM to use for THIS turn. Accepts any id in llm_handler.MODEL_OPTIONS.
-    # Unknown values silently fall back to the default — keeps old clients working.
     model: str = Field(default=DEFAULT_MODEL)
 
 
@@ -120,8 +106,7 @@ def _resolved_model(requested: str) -> str:
 
 @app.get("/models")
 def models():
-    """Expose the allowed model ids so the UI can render a selector without
-    hard-coding options."""
+    """Allowed model ids so the UI can render a selector."""
     return {
         "default": DEFAULT_MODEL,
         "options": list(MODEL_OPTIONS.keys()),
@@ -147,13 +132,6 @@ def chat(body: ChatIn) -> ChatOut:
         ],
     )
 
-
-# --- POST /chat/stream (SSE) ------------------------------------------------
-#
-# The orchestrator is synchronous (it blocks on ollama.Client.chat), so we run
-# it in a worker thread and bridge its `emit` callback through a thread-safe
-# queue into a sync generator that StreamingResponse drains into the HTTP
-# response body. The event names match FRONTEND_PLAN §4.2 exactly.
 
 def _format_sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
@@ -195,8 +173,6 @@ def chat_stream(body: ChatIn) -> StreamingResponse:
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            # Tell proxies not to buffer; without this, nginx/cloudflare hold
-            # the whole stream until it closes.
             "X-Accel-Buffering": "no",
         },
     )

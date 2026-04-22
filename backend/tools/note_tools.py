@@ -22,14 +22,9 @@ from backend.tools.schemas import (
 logger = logging.getLogger(__name__)
 
 
-# --- Per-tool handlers -----------------------------------------------------
-
 def _add_note(raw: dict) -> ToolResult:
     args = AddNoteArgs.model_validate(raw)
 
-    # Two-step gate (same pattern as delete_note). First call → preview;
-    # only the confirm=true second call actually writes. Prevents the model
-    # from committing a note before the user has verified the fields.
     if not args.confirm:
         return ToolResult(
             ok=False,
@@ -101,8 +96,6 @@ def _search_notes(raw: dict) -> ToolResult:
     data = [r.model_dump(mode="json") for r in results]
 
     if above:
-        # Confident match(es). If >1, surface as candidates so the model
-        # disambiguates with the user rather than picking itself.
         if len(results) > 1:
             return ToolResult(
                 ok=True,
@@ -116,9 +109,6 @@ def _search_notes(raw: dict) -> ToolResult:
             data=data,
         )
 
-    # Best-effort fallback: nothing beat the threshold, but the user may still
-    # want to see the closest few. The prompt tells the LLM to acknowledge
-    # "no strong match" and present these as low-confidence options.
     return ToolResult(
         ok=True,
         message=(
@@ -150,12 +140,7 @@ _DIGIT_RE = re.compile(r"\d")
 
 
 def _extract_digit_substitutions(old: str, new: str) -> list[tuple[str, str]]:
-    """Token-level replacements where at least one side contains a digit.
-
-    Conservative by design: only numeric substitutions (times like '5 pm',
-    dates, quantities) propagate across fields. Plain word swaps don't —
-    that would false-positive on unrelated descriptions.
-    """
+    """Token-level replacements where at least one side contains a digit."""
     old_tokens, new_tokens = old.split(), new.split()
     matcher = difflib.SequenceMatcher(None, old_tokens, new_tokens)
     subs: list[tuple[str, str]] = []
@@ -175,20 +160,15 @@ def _auto_sync_fields(
     new_title: str,
     new_description: str,
 ) -> tuple[str, str]:
-    """If the LLM updated only one of title/description but the numeric edit
-    also applies to the other field, propagate it. Belt-and-suspenders fix
-    for the 8B failure mode where the model misses one of two fields that
-    both mention '5 pm'."""
+    """Propagate a numeric edit across title/description when the LLM only updated one."""
     title_changed = current_title != new_title
     desc_changed = current_description != new_description
 
-    # Title changed, description wasn't — propagate into description
     if title_changed and not desc_changed:
         for old_tok, new_tok in _extract_digit_substitutions(current_title, new_title):
             if old_tok in new_description:
                 new_description = new_description.replace(old_tok, new_tok)
 
-    # Description changed, title wasn't — propagate into title
     elif desc_changed and not title_changed:
         for old_tok, new_tok in _extract_digit_substitutions(
             current_description, new_description
@@ -221,9 +201,6 @@ def _update_note(raw: dict) -> ToolResult:
             message=f"No note with id {args.note_id}.",
         )
 
-    # Compute merged fields + auto-sync any numeric edit across title/description.
-    # If the LLM updated only one of them but the edit is a time/date/quantity
-    # change that also applies to the other, propagate it.
     proposed_title = args.title if args.title is not None else current.title
     proposed_description = (
         args.description if args.description is not None else current.description
@@ -239,7 +216,6 @@ def _update_note(raw: dict) -> ToolResult:
     else:
         new_tag = current.tag
 
-    # Two-step gate — preview the merged fields BEFORE committing.
     if not args.confirm:
         return ToolResult(
             ok=False,
@@ -260,7 +236,6 @@ def _update_note(raw: dict) -> ToolResult:
             },
         )
 
-    # If auto-sync adjusted fields, commit the synced values (not the raw LLM ones).
     commit_title = synced_title if synced_title != proposed_title else args.title
     commit_description = (
         synced_description

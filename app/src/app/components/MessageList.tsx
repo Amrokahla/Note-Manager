@@ -17,7 +17,7 @@ export default function MessageList({ messages }: { messages: ChatMessage[] }) {
       className="flex-1 space-y-3 overflow-y-auto px-6 py-4"
     >
       {messages.length === 0 ? (
-        <p className="mt-10 text-center text-sm text-neutral-400">
+        <p className="mt-10 text-center text-sm text-slate-400">
           Say hi, jot a note, or ask what&rsquo;s on your list.
         </p>
       ) : (

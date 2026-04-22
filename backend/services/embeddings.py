@@ -9,8 +9,6 @@ from backend.config import settings
 
 logger = logging.getLogger(__name__)
 
-# nomic-embed-text emits 768-dim vectors. We normalize at write/query time so
-# cosine similarity is just a dot product — keeps the search loop tight.
 
 _client: Client | None = None
 
@@ -23,11 +21,7 @@ def _get_client() -> Client:
 
 
 def embed(text: str) -> np.ndarray:
-    """Return a unit-norm float32 embedding for `text`.
-
-    Raises on Ollama error — the caller (note_service) surfaces that as a
-    ToolResult so the LLM can tell the user something's wrong.
-    """
+    """Return a unit-norm float32 embedding for `text`; raises on Ollama error."""
     if not text or not text.strip():
         raise ValueError("Cannot embed empty text")
 
@@ -53,10 +47,8 @@ def from_blob(blob: bytes) -> np.ndarray:
 
 
 def cosine(a: np.ndarray, b: np.ndarray) -> float:
-    """Cosine similarity. Assumes both vectors are unit-norm (our write path
-    ensures this). Falls back to full formula if either has non-unit norm."""
+    """Cosine similarity; fast path when both vectors are already unit-norm."""
     dot = float(np.dot(a, b))
-    # Cheap guard in case a bad input slipped through.
     a_norm = float(np.linalg.norm(a))
     b_norm = float(np.linalg.norm(b))
     if a_norm == 0.0 or b_norm == 0.0:

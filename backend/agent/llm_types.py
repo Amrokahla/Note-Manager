@@ -5,9 +5,6 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 
-# Normalized types shared by every LLM provider implementation. The orchestrator
-# only ever sees these — no provider-specific shapes leak out.
-
 class ToolCall(BaseModel):
     name: str
     arguments: dict

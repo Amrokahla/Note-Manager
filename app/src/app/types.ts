@@ -23,15 +23,20 @@ export interface ToolCallRecord {
   endedAt?: number;
 }
 
-export type ModelId = "ollama" | "gemini-2.5-pro" | "gemini-2.5-flash";
+export type ModelId =
+  | "ollama"
+  | "ollama-llama3.2"
+  | "gemini-2.5-pro"
+  | "gemini-2.5-flash";
 
 export const MODEL_OPTIONS: { id: ModelId; label: string }[] = [
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
   { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
   { id: "ollama", label: "Ollama (llama3.1)" },
+  { id: "ollama-llama3.2", label: "Ollama (llama3.2)" },
 ];
 
-export const DEFAULT_MODEL: ModelId = "gemini-2.5-pro";
+export const DEFAULT_MODEL: ModelId = "gemini-2.5-flash";
 
 export interface AppState {
   sessionId: string;

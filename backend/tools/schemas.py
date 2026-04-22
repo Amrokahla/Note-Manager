@@ -8,13 +8,7 @@ from pydantic import BaseModel, BeforeValidator, Field
 
 
 def _coerce_json_list(v: Any) -> Any:
-    """Accept a JSON-encoded string as a list.
-
-    Small models sometimes emit list arguments as a JSON-encoded string
-    (e.g. `"[\\"work\\"]"`). Rather than fail the tool + retry, we parse the
-    string back into the list the model intended. Non-string or non-JSON
-    input is returned unchanged so the normal validators still run.
-    """
+    """Parse a JSON-encoded string into a list; small models sometimes stringify list args."""
     if isinstance(v, str):
         try:
             parsed = json.loads(v)
@@ -27,8 +21,6 @@ def _coerce_json_list(v: Any) -> Any:
 
 StrList = Annotated[list[str], BeforeValidator(_coerce_json_list)]
 
-
-# --- Tool argument models ---------------------------------------------------
 
 class AddNoteArgs(BaseModel):
     title: str = Field(..., min_length=1, max_length=200)
@@ -95,8 +87,6 @@ class DeleteNoteArgs(BaseModel):
     )
 
 
-# --- Uniform tool result envelope ------------------------------------------
-
 ErrorCode = Literal[
     "not_found",
     "invalid_arg",
@@ -114,8 +104,6 @@ class ToolResult(BaseModel):
     candidates: list[dict] | None = None
     error_code: ErrorCode | None = None
 
-
-# --- Ollama tool descriptors -----------------------------------------------
 
 def _tool(name: str, description: str, args_model: type[BaseModel]) -> dict:
     return {

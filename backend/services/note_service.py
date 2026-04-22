@@ -12,19 +12,12 @@ from backend.services.models import Note, NoteSummary, TagCount
 logger = logging.getLogger(__name__)
 
 
-# --- Tag normalization ------------------------------------------------------
-#
-# Single tag per note (redesigned). We strip/lowercase/peel leading # so the
-# same tag in different forms collapses. Empty strings become None.
-
 def normalize_tag(t: str | None) -> str | None:
     if t is None:
         return None
     cleaned = t.strip().lstrip("#").lower()
     return cleaned or None
 
-
-# --- Time / row helpers -----------------------------------------------------
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -52,17 +45,12 @@ def _row_to_summary(row: sqlite3.Row, similarity: float | None = None) -> NoteSu
     )
 
 
-# --- Embedding persistence --------------------------------------------------
-
 def _compose_embed_input(title: str, description: str) -> str:
     return f"{title}\n\n{description}"
 
 
 def _try_embed(title: str, description: str) -> tuple[bytes | None, str | None]:
-    """Return (blob, timestamp) for the note's embedding, or (None, None) if
-    the embedding service is down. Notes with missing embeddings are skipped
-    by semantic search and re-tried on the next write or backfill pass.
-    """
+    """Return (blob, timestamp) for the embedding, or (None, None) if Ollama is down."""
     try:
         vec = embeddings.embed(_compose_embed_input(title, description))
         return embeddings.to_blob(vec), _utc_now_iso()
@@ -70,8 +58,6 @@ def _try_embed(title: str, description: str) -> tuple[bytes | None, str | None]:
         logger.warning("Embedding failed for note: %s", e)
         return None, None
 
-
-# --- CRUD -------------------------------------------------------------------
 
 def create_note(title: str, description: str, tag: str | None = None) -> Note:
     now = _utc_now_iso()
@@ -114,8 +100,7 @@ def update_note(
     *,
     clear_tag: bool = False,
 ) -> Note | None:
-    """Patch an existing note. `clear_tag=True` explicitly sets tag to NULL
-    (distinguishes 'don't touch tag' from 'remove tag')."""
+    """Patch an existing note; `clear_tag=True` sets tag to NULL explicitly."""
     with tx() as conn:
         existing = conn.execute(
             "SELECT title, description FROM notes WHERE id = ?", (note_id,)
@@ -137,8 +122,6 @@ def update_note(
             set_clauses.append("tag = ?")
             args.append(normalize_tag(tag))
 
-        # If title or description changed, re-embed. Tag-only edits don't move
-        # the semantic needle, so we skip embedding work on those.
         text_changed = title is not None or description is not None
         if text_changed:
             new_title = title if title is not None else existing["title"]
@@ -150,7 +133,6 @@ def update_note(
             args.append(ts)
 
         if not set_clauses:
-            # No-op patch — return the current row unchanged.
             row = conn.execute(
                 "SELECT id, title, description, tag, created_at, updated_at "
                 "FROM notes WHERE id = ?",
@@ -179,8 +161,6 @@ def delete_note(note_id: int) -> bool:
         return cur.rowcount > 0
 
 
-# --- Listing / tag queries --------------------------------------------------
-
 def list_notes(tag: str | None = None, limit: int = 10) -> list[NoteSummary]:
     norm_tag = normalize_tag(tag) if tag else None
     with tx() as conn:
@@ -205,8 +185,7 @@ def list_notes(tag: str | None = None, limit: int = 10) -> list[NoteSummary]:
 
 
 def list_tags(limit: int = 4) -> list[TagCount]:
-    """Return the top-N tags by usage count. Used by add-note flow to suggest
-    reusing an existing tag."""
+    """Return the top-N tags by usage count."""
     with tx() as conn:
         rows = conn.execute(
             """
@@ -222,25 +201,13 @@ def list_tags(limit: int = 4) -> list[TagCount]:
     return [TagCount(tag=r["tag"], count=r["c"]) for r in rows]
 
 
-# --- Semantic search --------------------------------------------------------
-
 def search_semantic(
     query: str,
     limit: int = 5,
     threshold: float | None = None,
     fallback_limit: int | None = None,
 ) -> tuple[list[NoteSummary], bool]:
-    """Rank notes by cosine similarity to `query`.
-
-    Returns `(results, above_threshold)`:
-      - If any notes score >= threshold → returns those notes (up to `limit`),
-        `above_threshold=True`.
-      - Else if notes exist with embeddings → returns the top
-        `fallback_limit` by similarity (all below threshold),
-        `above_threshold=False`. The dispatcher labels these as
-        "no strong match" so the LLM reports honestly.
-      - Else → returns `([], False)` (no embedded notes at all).
-    """
+    """Rank notes by cosine similarity; returns (results, above_threshold)."""
     if threshold is None:
         threshold = settings.search_threshold
     if fallback_limit is None:
@@ -270,17 +237,11 @@ def search_semantic(
     if above:
         return [_row_to_summary(r, similarity=s) for s, r in above[:limit]], True
 
-    # Best-effort fallback: no note cleared the bar, so surface the closest few
-    # anyway. The dispatcher message flags these as low-confidence so the LLM
-    # presents them as "here are the closest I have" rather than real matches.
     return [_row_to_summary(r, similarity=s) for s, r in scored[:fallback_limit]], False
 
 
-# --- Backfill ---------------------------------------------------------------
-
 def backfill_embeddings() -> int:
-    """Embed every note that doesn't yet have an embedding. Returns the count.
-    Called once on app startup. Safe to run repeatedly — idempotent."""
+    """Embed every note that doesn't yet have an embedding; idempotent."""
     with tx() as conn:
         rows = conn.execute(
             "SELECT id, title, description FROM notes WHERE embedding IS NULL"

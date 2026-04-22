@@ -17,8 +17,7 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiError(RuntimeError):
-    """Clean, user-facing error for Gemini failures. Replaces the giant
-    JSON-blob stack traces that leak from the raw SDK."""
+    """User-facing error for Gemini failures; replaces raw SDK stack traces."""
 
 
 def _cleanup_gemini_error(model: str, exc: BaseException) -> GeminiError:
@@ -36,7 +35,6 @@ def _cleanup_gemini_error(model: str, exc: BaseException) -> GeminiError:
                 f"access to '{model}'."
             )
         if status == 400:
-            # Surface the first meaningful line of the error to help debug.
             msg = str(exc).split("\n", 1)[0]
             return GeminiError(f"Gemini rejected the request: {msg}")
     if isinstance(exc, genai_errors.ServerError):
@@ -46,7 +44,6 @@ def _cleanup_gemini_error(model: str, exc: BaseException) -> GeminiError:
     return GeminiError(f"Gemini error ({exc.__class__.__name__}): {str(exc)[:200]}")
 
 
-# Lazy singleton — tests can monkeypatch `_client` without invoking the SDK.
 _client: genai.Client | None = None
 
 
@@ -60,23 +57,6 @@ def _get_client() -> genai.Client:
         _client = genai.Client(api_key=settings.gemini_api_key)
     return _client
 
-
-# --- Message format translation --------------------------------------------
-#
-# Our canonical message shape (same one Ollama uses):
-#   {"role": "system",    "content": "..."}
-#   {"role": "user",      "content": "..."}
-#   {"role": "assistant", "content": "..."}
-#   {"role": "assistant", "tool_calls": [{"function": {"name": ..., "arguments": {...}}}]}
-#   {"role": "tool",      "name": ..., "content": "<JSON of ToolResult>"}
-#
-# Gemini's shape:
-#   system_instruction: "..."  (flat string or Content)
-#   contents: [
-#     {"role": "user"  | "model", "parts": [{"text": "..."}]},
-#     {"role": "model",           "parts": [{"function_call": {"name":..., "args":{}}}]},
-#     {"role": "user",            "parts": [{"function_response": {"name":..., "response":{}}}]}
-#   ]
 
 def _translate_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
     system_bits: list[str] = []
@@ -137,37 +117,59 @@ def _translate_messages(messages: list[dict]) -> tuple[str | None, list[dict]]:
             )
 
     system_instruction = "\n\n".join(system_bits) if system_bits else None
-    return system_instruction, contents
+    return system_instruction, _repair_function_pairs(contents)
 
 
-# --- Tool schema translation -----------------------------------------------
-#
-# Our TOOL_DEFS format (OpenAI-style):
-#   {"type": "function", "function": {"name": ..., "description": ..., "parameters": {...}}}
-#
-# Gemini wants:
-#   types.Tool(function_declarations=[types.FunctionDeclaration(name=..., description=..., parameters=...)])
-#
-# Gemini's parameters are JSON Schema but with restrictions: no $ref, no $defs,
-# and nullable fields need `nullable: true` instead of `anyOf: [X, null]`.
+def _repair_function_pairs(contents: list[dict]) -> list[dict]:
+    """Drop orphan function_call / function_response turns so Gemini's pairing rule holds."""
+    def _is_fn_call_turn(c: dict) -> bool:
+        return c.get("role") == "model" and any(
+            isinstance(p, dict) and "function_call" in p for p in c.get("parts") or []
+        )
 
-# Schema metadata keys that Gemini doesn't accept at the schema-node level.
-# NOTE: we do NOT drop `title` globally — it's a legal Pydantic metadata key at
-# the schema level but is ALSO a valid property name (our AddNoteArgs has a
-# `title` property). We only strip it from schema nodes themselves, never
-# from inside a `properties` dict.
+    def _is_fn_response_turn(c: dict) -> bool:
+        return c.get("role") == "user" and any(
+            isinstance(p, dict) and "function_response" in p for p in c.get("parts") or []
+        )
+
+    out: list[dict] = []
+    i = 0
+    while i < len(contents):
+        curr = contents[i]
+        if _is_fn_call_turn(curr):
+            nxt = contents[i + 1] if i + 1 < len(contents) else None
+            if nxt is not None and _is_fn_response_turn(nxt):
+                out.append(curr)
+                out.append(nxt)
+                i += 2
+                continue
+            logger.warning(
+                "Dropping orphan function_call turn (no function_response follows): %r",
+                curr.get("parts"),
+            )
+            i += 1
+            continue
+        if _is_fn_response_turn(curr):
+            logger.warning(
+                "Dropping orphan function_response turn (no preceding function_call): %r",
+                curr.get("parts"),
+            )
+            i += 1
+            continue
+        out.append(curr)
+        i += 1
+    return out
+
+
 _UNSUPPORTED_AT_NODE = {"$schema"}
 
 
 def _normalize_schema_for_gemini(schema: dict) -> dict:
-    """Inline $refs, collapse anyOf[X, null] → {X, nullable: true}, drop
-    schema keys Gemini rejects. Recursive. Non-destructive on the input."""
+    """Inline $refs, collapse anyOf[X, null] to nullable, drop keys Gemini rejects."""
     schema = copy.deepcopy(schema)
     defs = schema.pop("$defs", {}) or {}
 
     def walk_schema(node: Any) -> Any:
-        """Walk a JSON-schema NODE. Metadata keys like $schema / $defs /
-        title are interpreted as schema metadata here and stripped/inlined."""
         if isinstance(node, list):
             return [walk_schema(x) for x in node]
         if not isinstance(node, dict):
@@ -201,14 +203,10 @@ def _normalize_schema_for_gemini(schema: dict) -> dict:
         for k, v in node.items():
             if k in _UNSUPPORTED_AT_NODE or k == "$defs":
                 continue
-            # `title` as a schema-metadata key (value is a string) is cosmetic —
-            # drop it. As a property NAME inside `properties`, it's meaningful
-            # — handled below by not recursing into properties with walk_schema.
             if k == "title" and isinstance(v, str):
                 continue
             if k == "properties" and isinstance(v, dict):
                 out[k] = {
-                    # Do NOT strip/rewrite property names; they're user data.
                     prop_name: walk_schema(prop_schema)
                     for prop_name, prop_schema in v.items()
                 }
@@ -239,11 +237,8 @@ def _translate_tools(tool_defs: list[dict]) -> list[genai_types.Tool]:
     return [genai_types.Tool(function_declarations=declarations)]
 
 
-# --- Response normalization ------------------------------------------------
-
 def _safety_block_none() -> list[genai_types.SafetySetting]:
-    """The note app has zero safety concerns — turn off Gemini's content
-    filters so benign note text (e.g. "delete everything") isn't blocked."""
+    """Disable Gemini safety filters; note text has no sensitive content."""
     categories = [
         "HARM_CATEGORY_HARASSMENT",
         "HARM_CATEGORY_HATE_SPEECH",
@@ -262,7 +257,6 @@ def _extract_tool_calls_from_parts(parts: list) -> list[ToolCall]:
         fc = getattr(part, "function_call", None)
         if fc and getattr(fc, "name", None):
             args = getattr(fc, "args", None) or {}
-            # Gemini may return a MapComposite or dict-like — normalize to dict.
             if not isinstance(args, dict):
                 try:
                     args = dict(args)
@@ -281,8 +275,6 @@ def _extract_text_from_parts(parts: list) -> str:
     return "".join(buf)
 
 
-# --- Public entry point ----------------------------------------------------
-
 def chat(
     messages: list[dict],
     *,
@@ -290,11 +282,7 @@ def chat(
     tools: list[dict] | None = None,
     on_delta: Callable[[str], None] | None = None,
 ) -> LLMResponse:
-    """Send `messages` to Gemini and return a normalized LLMResponse.
-
-    `model` is the concrete Gemini model id (e.g. "gemini-2.5-pro"). Streaming
-    is enabled when `on_delta` is provided.
-    """
+    """Send `messages` to Gemini and return a normalized LLMResponse; streams when `on_delta` is set."""
     client = _get_client()
     system_instruction, contents = _translate_messages(messages)
     gemini_tools = _translate_tools(tools if tools is not None else TOOL_DEFS)
@@ -328,6 +316,7 @@ def _chat_streaming(
     config: genai_types.GenerateContentConfig,
     on_delta: Callable[[str], None],
 ) -> LLMResponse:
+    """Consume Gemini's streaming response part-by-part."""
     full_text_parts: list[str] = []
     collected_tool_calls: list[ToolCall] = []
 
@@ -335,24 +324,37 @@ def _chat_streaming(
         model=model, contents=contents, config=config
     )
     for chunk in stream:
-        # Stream text deltas immediately.
-        text = getattr(chunk, "text", None)
-        if text:
-            full_text_parts.append(text)
-            on_delta(text)
-
-        # Collect function_call parts as they arrive (usually last chunk).
         candidates = getattr(chunk, "candidates", None) or []
         for cand in candidates:
             content = getattr(cand, "content", None)
             if content is None:
                 continue
             parts = getattr(content, "parts", None) or []
-            collected_tool_calls.extend(_extract_tool_calls_from_parts(parts))
+            for part in parts:
+                text = getattr(part, "text", None)
+                if text:
+                    full_text_parts.append(text)
+                    on_delta(text)
+                fc = getattr(part, "function_call", None)
+                if fc and getattr(fc, "name", None):
+                    args = getattr(fc, "args", None) or {}
+                    if not isinstance(args, dict):
+                        try:
+                            args = dict(args)
+                        except Exception:
+                            args = {}
+                    collected_tool_calls.append(
+                        ToolCall(name=fc.name, arguments=args)
+                    )
 
     if collected_tool_calls:
         return LLMResponse(kind="tool_calls", tool_calls=collected_tool_calls)
-    return LLMResponse(kind="message", content="".join(full_text_parts))
+    content = "".join(full_text_parts)
+    if not content:
+        logger.warning(
+            "Gemini stream (model=%s) produced no text and no tool calls", model
+        )
+    return LLMResponse(kind="message", content=content)
 
 
 def _normalize_response(resp: Any) -> LLMResponse:

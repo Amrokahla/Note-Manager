@@ -2,15 +2,12 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from backend.config import settings
 from backend.tools.schemas import ToolResult
 
 
-# Cap message history at 2 * HISTORY_TURNS so a "turn" == one user + one
-# assistant (or tool) message pair. Default config → 40 messages, matching
-# PLAN §6.3. Going past this risks blowing llama3.2's context window; going
-# below it loses the multi-turn awareness that makes "that note" work.
 _MAX_MESSAGES = settings.history_turns * 2
 
 
@@ -25,9 +22,7 @@ class SessionState:
 
 
 class SessionStore:
-    """In-memory per-session state. The interface (`get`, `reset`) is small on
-    purpose — swapping to Redis later means reimplementing these two methods.
-    """
+    """In-memory per-session state; swap to Redis by reimplementing `get`/`reset`."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, SessionState] = {}
@@ -47,14 +42,7 @@ class SessionStore:
 
 
 def remember_referenced(state: SessionState, result: ToolResult) -> None:
-    """Harvest note ids from a ToolResult so the orchestrator can resolve
-    pronoun references ("that note", "the last one", "it") on future turns.
-
-    Only updates state when the result actually carries ids. A search that
-    returned zero matches or a tool that failed leaves `last_referenced_note_ids`
-    alone — the user is probably still talking about whatever they last
-    looked at.
-    """
+    """Harvest note ids from a ToolResult to resolve later pronoun references."""
     ids = _harvest_ids(result.data)
     if ids:
         state.last_referenced_note_ids = ids
@@ -73,17 +61,12 @@ def _harvest_ids(data: object) -> list[int]:
         rid = data.get("id")
         if isinstance(rid, int):
             collected.append(rid)
-        # delete_note's confirmation response wraps the note under "preview".
-        # Capturing that id means "yes, delete it" stays resolvable without
-        # the LLM having to echo the number back.
         preview = data.get("preview")
         if isinstance(preview, dict):
             pid = preview.get("id")
             if isinstance(pid, int):
                 collected.append(pid)
 
-    # De-dupe while preserving order — a search that returns [3, 5, 3] shouldn't
-    # make "that note" ambiguous between duplicates.
     seen: set[int] = set()
     unique: list[int] = []
     for i in collected:
@@ -94,14 +77,13 @@ def _harvest_ids(data: object) -> list[int]:
 
 
 def build_context_line(state: SessionState) -> str | None:
-    """Produce the hidden '(context)' system turn injected before each user
-    message, or None if there's nothing worth telling the model.
-
-    Small-model trick (PLAN §6.2): llama3.2 at 3B tracks pronoun references
-    poorly from message history alone. An explicit reminder of the candidate
-    ids and any pending confirmation dramatically improves multi-turn behaviour.
-    """
+    """Build the hidden '(context)' system turn injected before each user message."""
     parts: list[str] = []
+
+    now = datetime.now().astimezone()
+    parts.append(
+        f'Today is {now.strftime("%A, %B %d, %Y")} (local time).'
+    )
 
     if state.last_referenced_note_ids:
         ids = state.last_referenced_note_ids

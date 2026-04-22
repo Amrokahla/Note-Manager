@@ -1,8 +1,6 @@
 import type { ModelId } from "../types";
 import { DEFAULT_MODEL, MODEL_OPTIONS } from "../types";
 
-// Persist the model pick across page reloads. Keyed in localStorage so a
-// single user on one browser has a stable preference.
 const STORAGE_KEY = "note-agent:model";
 
 const VALID: Set<ModelId> = new Set(MODEL_OPTIONS.map((o) => o.id));
@@ -25,7 +23,5 @@ export function saveModel(id: ModelId): void {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(STORAGE_KEY, id);
-  } catch {
-    // storage blocked — fine, just non-persistent for this session
-  }
+  } catch {}
 }

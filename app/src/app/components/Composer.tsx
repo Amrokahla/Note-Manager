@@ -22,7 +22,7 @@ export default function Composer({ disabled, onSubmit }: Props) {
   return (
     <form
       onSubmit={handleSubmit}
-      className="border-t border-neutral-200 bg-white px-6 py-4"
+      className="border-t border-slate-200 bg-white px-6 py-4"
     >
       <label htmlFor="composer-input" className="sr-only">
         Message
@@ -36,12 +36,12 @@ export default function Composer({ disabled, onSubmit }: Props) {
           onChange={(e) => setValue(e.target.value)}
           placeholder="Talk to your notes…"
           disabled={disabled}
-          className="flex-1 rounded-md border border-neutral-300 bg-white px-3 py-2 text-sm text-neutral-900 placeholder-neutral-400 focus:border-indigo-400 focus:outline-none focus:ring-2 focus:ring-indigo-200 disabled:bg-neutral-50"
+          className="flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-[color:var(--color-petrol)] focus:outline-none focus:ring-2 focus:ring-[color:var(--color-petrol)]/25 disabled:bg-slate-50"
         />
         <button
           type="submit"
           disabled={!canSend}
-          className="inline-flex items-center gap-1 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-neutral-300"
+          className="inline-flex items-center gap-1 rounded-md bg-[color:var(--color-petrol)] px-3 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-[color:var(--color-petrol-dark)] disabled:cursor-not-allowed disabled:bg-slate-300"
         >
           <Send size={14} />
           Send

@@ -15,8 +15,6 @@ interface Props {
 }
 
 export default function ChatPanel({ state, dispatch }: Props) {
-  // Remember the last message we sent so Retry has something to re-submit.
-  // Kept in a ref (not state) because it shouldn't trigger re-renders.
   const lastSent = useRef<string | null>(null);
 
   async function submit(text: string) {
@@ -29,9 +27,7 @@ export default function ChatPanel({ state, dispatch }: Props) {
     dispatch({ type: "STREAM_START" });
 
     await sendMessage(state.sessionId, text, turnId, state.model, {
-      onUserEcho: () => {
-        /* we already echoed above; noop keeps parity with F3 event flow */
-      },
+      onUserEcho: () => {},
       onToolCall: (call) => dispatch({ type: "TOOL_CALL_START", call }),
       onToolResult: (r) =>
         dispatch({
@@ -60,7 +56,7 @@ export default function ChatPanel({ state, dispatch }: Props) {
   }
 
   return (
-    <section className="flex min-h-0 flex-col">
+    <section className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
       <MessageList messages={state.messages} />
       {state.error && (
         <ErrorBanner

@@ -22,7 +22,6 @@ class NoteSummary(BaseModel):
     description: str
     tag: str | None = None
     updated_at: datetime
-    # Populated only by semantic search results; None for list_notes.
     similarity: float | None = None
 
 

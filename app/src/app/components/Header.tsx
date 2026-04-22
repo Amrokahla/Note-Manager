@@ -21,9 +21,11 @@ export default function Header({
   onModelChange,
 }: Props) {
   return (
-    <header className="flex items-center justify-between border-b border-neutral-200 bg-white px-6 py-3">
-      <h1 className="text-base font-semibold text-neutral-900">Note Agent</h1>
-      <div className="flex items-center gap-3 text-xs text-neutral-500">
+    <header className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-3 shadow-sm">
+      <h1 className="text-base font-semibold text-[color:var(--color-petrol)]">
+        Note Agent
+      </h1>
+      <div className="flex items-center gap-3 text-xs text-slate-500">
         <ModelSelector
           value={model}
           disabled={isStreaming}
@@ -37,7 +39,7 @@ export default function Header({
         <button
           type="button"
           onClick={onReset}
-          className="inline-flex items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 py-1 text-neutral-600 transition-colors hover:bg-neutral-50 hover:text-neutral-900"
+          className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-slate-600 transition-colors hover:border-[color:var(--color-petrol)]/40 hover:text-[color:var(--color-petrol)]"
         >
           <RotateCcw size={12} />
           Reset

@@ -12,11 +12,15 @@ interface Props {
 
 export default function ModelSelector({ value, disabled, onChange }: Props) {
   return (
-    <label className="inline-flex items-center gap-1 rounded-md border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-700 focus-within:border-indigo-400 focus-within:ring-2 focus-within:ring-indigo-200">
-      <Cpu size={12} aria-hidden="true" />
+    <label className="inline-flex items-center gap-1 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 transition-colors focus-within:border-[color:var(--color-petrol)] focus-within:ring-2 focus-within:ring-[color:var(--color-petrol)]/25">
+      <Cpu
+        size={12}
+        aria-hidden="true"
+        className="text-[color:var(--color-petrol)]"
+      />
       <span className="sr-only">Model</span>
       <select
-        className="bg-transparent pr-1 text-xs font-medium text-neutral-800 outline-none disabled:text-neutral-400"
+        className="bg-transparent pr-1 text-xs font-medium text-slate-800 outline-none disabled:text-slate-400"
         value={value}
         disabled={disabled}
         onChange={(e) => onChange(e.target.value as ModelId)}

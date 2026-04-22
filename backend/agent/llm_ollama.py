@@ -14,12 +14,6 @@ from backend.tools.schemas import TOOL_DEFS, TOOL_NAMES
 logger = logging.getLogger(__name__)
 
 
-# --- Client plumbing --------------------------------------------------------
-#
-# Lazily initialised so unit tests can monkeypatch `_client` with a fake
-# without the `Client(...)` constructor ever running (which would otherwise
-# try to resolve the Ollama host at import time).
-
 _client: Client | None = None
 
 
@@ -39,12 +33,7 @@ def _as_dict(resp: Any) -> dict:
 
 
 def _coerce_arguments(raw: Any) -> dict:
-    """Normalize whatever the SDK handed us into a dict.
-
-    Some Ollama versions return tool-call `arguments` as a JSON-encoded string
-    instead of a parsed object. Down-stream code expects a dict, so we parse
-    here once and only once.
-    """
+    """Normalize SDK tool-call `arguments` (some Ollama versions emit a JSON string) into a dict."""
     if raw is None:
         return {}
     if isinstance(raw, dict):
@@ -59,25 +48,21 @@ def _coerce_arguments(raw: Any) -> dict:
     return {}
 
 
-# --- Public entry point -----------------------------------------------------
-
 def chat(
     messages: list[dict],
     *,
     tools: list[dict] | None = None,
     on_delta: Callable[[str], None] | None = None,
+    model: str | None = None,
 ) -> LLMResponse:
-    """Send `messages` to Ollama and return a normalized `LLMResponse`.
-
-    Temperature is fixed at 0.2 — low enough to prefer tool calls over
-    creative prose, but not zero so the model doesn't loop on refusals.
-    """
+    """Send `messages` to Ollama and return a normalized LLMResponse."""
+    target_model = model or settings.ollama_model
     client = _get_client()
     if on_delta is not None:
-        return _chat_streaming(client, messages, tools, on_delta)
+        return _chat_streaming(client, target_model, messages, tools, on_delta)
 
     resp = client.chat(
-        model=settings.ollama_model,
+        model=target_model,
         messages=messages,
         tools=tools if tools is not None else TOOL_DEFS,
         options={"temperature": 0.2},
@@ -88,12 +73,13 @@ def chat(
 
 def _chat_streaming(
     client: Client,
+    model: str,
     messages: list[dict],
     tools: list[dict] | None,
     on_delta: Callable[[str], None],
 ) -> LLMResponse:
     stream = client.chat(
-        model=settings.ollama_model,
+        model=model,
         messages=messages,
         tools=tools if tools is not None else TOOL_DEFS,
         options={"temperature": 0.2},
@@ -150,12 +136,6 @@ def _normalize_response(data: dict) -> LLMResponse:
 
     return LLMResponse(kind="message", content=text, raw=data)
 
-
-# --- JSON-repair fallback ---------------------------------------------------
-#
-# Smaller llama variants occasionally emit a tool call as JSON inside `content`
-# instead of populating `tool_calls`. Rather than let that reply dead-end,
-# we salvage it here. Ollama-specific — Gemini doesn't need this.
 
 _JSON_BLOCK_RE = re.compile(r"\{.*\}", re.DOTALL)
 

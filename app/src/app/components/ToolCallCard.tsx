@@ -9,18 +9,18 @@ export default function ToolCallCard({ call }: { call: ToolCallRecord }) {
       ? "text-rose-700"
       : call.status === "needs_confirmation"
         ? "text-amber-700"
-        : "text-neutral-600";
+        : "text-slate-600";
 
   return (
-    <div className="rounded-lg border border-neutral-200 bg-white p-3 text-xs shadow-sm">
+    <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs shadow-sm">
       <div className="flex items-center justify-between gap-2">
-        <code className="font-mono text-[13px] font-semibold text-neutral-900">
+        <code className="font-mono text-[13px] font-semibold text-[color:var(--color-petrol)]">
           {call.name}
         </code>
         <StatusBadge status={call.status} />
       </div>
 
-      <pre className="mt-2 max-h-32 overflow-hidden rounded bg-neutral-50 p-2 text-[11px] whitespace-pre-wrap break-words text-neutral-600">
+      <pre className="mt-2 max-h-32 overflow-hidden rounded bg-slate-50 p-2 text-[11px] whitespace-pre-wrap break-words text-slate-600">
         {JSON.stringify(call.arguments, null, 2)}
       </pre>
 
@@ -29,7 +29,7 @@ export default function ToolCallCard({ call }: { call: ToolCallRecord }) {
       )}
 
       {call.durationMs !== undefined && (
-        <p className="mt-1 text-[10px] text-neutral-400">{call.durationMs} ms</p>
+        <p className="mt-1 text-[10px] text-slate-400">{call.durationMs} ms</p>
       )}
     </div>
   );

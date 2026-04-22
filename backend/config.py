@@ -18,8 +18,6 @@ class Settings:
     history_turns: int = int(os.getenv("HISTORY_TURNS", "20"))
     search_threshold: float = float(os.getenv("SEARCH_THRESHOLD", "0.35"))
     search_fallback_limit: int = int(os.getenv("SEARCH_FALLBACK_LIMIT", "3"))
-    # Google Gemini — optional. Only required when the UI selects a gemini-*
-    # model. Never logged; .env is gitignored.
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY") or None
 
 

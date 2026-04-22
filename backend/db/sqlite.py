@@ -7,12 +7,6 @@ from typing import Iterator
 
 from backend.config import settings
 
-# Single-table schema. One tag per note (denormalized — user-requested design).
-# Embeddings live in-row as packed float32 bytes; NULL means "not yet embedded"
-# so the backfill pass on startup has a trivial WHERE clause.
-#
-# Why no FTS5: semantic search via nomic-embed-text supersedes keyword matching
-# for free-text. Tag queries are plain WHERE clauses, no FTS needed.
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS notes (

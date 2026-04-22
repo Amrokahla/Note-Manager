@@ -23,10 +23,6 @@ export type Action =
   | { type: "DISMISS_ERROR" }
   | { type: "RESET" };
 
-// The initial state is intentionally deterministic — sessionId is empty.
-// Generating a UUID here would run during SSR and again during client
-// hydration with a different value, causing a hydration mismatch. The page
-// dispatches INIT_SESSION from a useEffect after mount to fill it in.
 export function initialState(seed?: Partial<AppState>): AppState {
   return {
     sessionId: seed?.sessionId ?? "",
@@ -41,7 +37,6 @@ export function initialState(seed?: Partial<AppState>): AppState {
 export function appReducer(state: AppState, action: Action): AppState {
   switch (action.type) {
     case "INIT_SESSION":
-      // Idempotent: ignore a second init if we already have a session.
       return state.sessionId ? state : { ...state, sessionId: action.sessionId };
 
     case "SET_MODEL":
@@ -63,11 +58,6 @@ export function appReducer(state: AppState, action: Action): AppState {
       };
 
     case "ASSISTANT_DELTA": {
-      // Append to the last assistant message for this turn. If none exists
-      // yet (first delta of the turn), create a placeholder we'll keep
-      // appending to. The final ASSISTANT_MESSAGE will overwrite the content
-      // with the server's authoritative version — cheap safety net in case
-      // the stream and the final differ.
       const msgs = state.messages;
       const last = msgs[msgs.length - 1];
       if (last && last.role === "assistant" && last.turnId === action.turnId) {
@@ -95,9 +85,6 @@ export function appReducer(state: AppState, action: Action): AppState {
     }
 
     case "ASSISTANT_MESSAGE": {
-      // If we already streamed an assistant message for this turn, finalize
-      // it (replace content in case of drift, keep id and createdAt).
-      // Otherwise create a fresh one (non-streaming path).
       const msgs = state.messages;
       const last = msgs[msgs.length - 1];
       if (last && last.role === "assistant" && last.turnId === action.turnId) {
@@ -151,8 +138,6 @@ export function appReducer(state: AppState, action: Action): AppState {
       return { ...state, isStreaming: false };
 
     case "STREAM_DROP":
-      // Connection died mid-turn. Flip every card that was still "running"
-      // to "fail" so the UI doesn't leave a stale spinner behind.
       return {
         ...state,
         toolCalls: state.toolCalls.map((tc) =>
@@ -175,9 +160,6 @@ export function appReducer(state: AppState, action: Action): AppState {
       return { ...state, error: undefined };
 
     case "RESET":
-      // Fired from a click handler — always client-side, so generating a
-      // fresh UUID here is safe (no SSR path). Preserve the current model
-      // choice so a reset doesn't wipe the user's selector pick.
       return initialState({ sessionId: newSessionId(), model: state.model });
   }
 }

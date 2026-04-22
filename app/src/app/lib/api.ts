@@ -1,11 +1,5 @@
 import type { ModelId, ToolCallRecord, ToolStatus } from "../types";
 
-// F3: streaming POST /chat/stream per FRONTEND_PLAN §4.2. The backend is an
-// SSE source whose event names are: user_echo, tool_call, tool_result,
-// assistant, done, error. We parse the stream frame-by-frame and dispatch
-// events through the same handler interface F2 introduced — components don't
-// change when transports swap.
-
 export interface ChatHandlers {
   onUserEcho: (m: string) => void;
   onToolCall: (c: ToolCallRecord) => void;
@@ -94,7 +88,6 @@ export async function sendMessage(
 
       buf += decoder.decode(value, { stream: true });
 
-      // SSE frame separator is a blank line — i.e. \n\n.
       let boundary: number;
       while ((boundary = buf.indexOf("\n\n")) !== -1) {
         const frame = buf.slice(0, boundary);
@@ -104,8 +97,6 @@ export async function sendMessage(
       }
     }
   } catch {
-    // Stream broke mid-turn — tell the caller so it can fail any in-flight
-    // tool cards, then surface a human-friendly error.
     handlers.onStreamDrop();
     handlers.onError("Connection to the agent was lost.");
     handlers.onDone();
@@ -113,8 +104,6 @@ export async function sendMessage(
   }
 
   if (!sawDone) {
-    // Server closed cleanly but never sent a done frame — same handling as a
-    // hard drop: fail any in-flight tool calls.
     handlers.onStreamDrop();
   }
   handlers.onDone();
@@ -128,7 +117,7 @@ function dispatchFrame(
   let eventType = "message";
   let dataLine = "";
   for (const line of frame.split("\n")) {
-    if (line.startsWith(":")) continue; // SSE comment / keep-alive
+    if (line.startsWith(":")) continue;
     if (line.startsWith("event: ")) eventType = line.slice("event: ".length).trim();
     else if (line.startsWith("data: ")) dataLine = line.slice("data: ".length);
   }

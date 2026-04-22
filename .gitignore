@@ -12,5 +12,6 @@ data/
 .DS_Store
 .cursor/
 .claude/
-docs/
+docs/plans
+docs/files
 backend/tests/

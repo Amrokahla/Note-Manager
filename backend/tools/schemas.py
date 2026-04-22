@@ -42,6 +42,19 @@ class ListNotesArgs(BaseModel):
         description="Optional tag filter. When set, returns notes with this tag only.",
     )
     limit: int = Field(default=10, ge=1, le=50)
+    date_from: datetime | None = Field(
+        default=None,
+        description=(
+            "Optional lower bound on the note's created_at (inclusive). "
+            "ISO-8601 date or datetime, e.g. '2026-04-15'. Compute this from "
+            "today's date in the (context) line for relative phrases like "
+            "'last week' or 'yesterday'."
+        ),
+    )
+    date_to: datetime | None = Field(
+        default=None,
+        description="Optional upper bound on created_at (inclusive). Same format as date_from.",
+    )
 
 
 class ListTagsArgs(BaseModel):

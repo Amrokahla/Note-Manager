@@ -26,6 +26,7 @@ interface ToolCallPayload {
   name: string;
   arguments: Record<string, unknown>;
   status: ServerToolStatus;
+  continues_pending?: boolean;
 }
 interface ToolResultPayload {
   id: string;
@@ -144,6 +145,7 @@ function dispatchFrame(
         arguments: p.arguments,
         status: "running",
         startedAt: Date.now(),
+        continuesPending: p.continues_pending ?? false,
       });
       return "continue";
     }

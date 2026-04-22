@@ -21,6 +21,7 @@ export interface ToolCallRecord {
   durationMs?: number;
   startedAt: number;
   endedAt?: number;
+  continuesPending?: boolean;
 }
 
 export type ModelId =

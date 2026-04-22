@@ -287,11 +287,18 @@ def chat(
     system_instruction, contents = _translate_messages(messages)
     gemini_tools = _translate_tools(tools if tools is not None else TOOL_DEFS)
 
+    thinking_config = (
+        genai_types.ThinkingConfig(thinking_budget=0)
+        if "flash" in model.lower()
+        else None
+    )
+
     config = genai_types.GenerateContentConfig(
         system_instruction=system_instruction,
         tools=gemini_tools or None,
         temperature=0.2,
         safety_settings=_safety_block_none(),
+        thinking_config=thinking_config,
     )
 
     if on_delta is not None:

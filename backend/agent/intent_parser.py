@@ -246,11 +246,24 @@ def handle_user_message(
             model=model,
         )
 
+        if resp.kind == "message" and not (resp.content or "").strip():
+            logger.warning(
+                "Empty response from model=%s session=%s — retrying once",
+                model,
+                session_id,
+            )
+            resp = llm_handler.chat(
+                messages,
+                tools=tools_for_turn,
+                on_delta=None,
+                model=model,
+            )
+
         if resp.kind == "message":
             reply = (resp.content or "").strip()
             if not reply:
                 logger.warning(
-                    "Empty assistant content from model=%s session=%s — using fallback",
+                    "Still empty after retry from model=%s session=%s — using fallback",
                     model,
                     session_id,
                 )
@@ -266,6 +279,10 @@ def handle_user_message(
 
         for call in resp.tool_calls:
             tc_id = f"tc-{uuid.uuid4().hex[:8]}"
+            continues_pending = (
+                state.pending_confirmation is not None
+                and state.pending_confirmation.get("tool") == call.name
+            )
             _emit(
                 "tool_call",
                 {
@@ -273,6 +290,7 @@ def handle_user_message(
                     "name": call.name,
                     "arguments": call.arguments,
                     "status": "running",
+                    "continues_pending": continues_pending,
                 },
             )
             result = _run_tool_call(state, call, force_confirm=force_confirm)

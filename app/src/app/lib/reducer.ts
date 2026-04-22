@@ -111,8 +111,23 @@ export function appReducer(state: AppState, action: Action): AppState {
       };
     }
 
-    case "TOOL_CALL_START":
-      return { ...state, toolCalls: [...state.toolCalls, action.call] };
+    case "TOOL_CALL_START": {
+      const newCall = action.call;
+      if (newCall.continuesPending) {
+        for (let i = state.toolCalls.length - 1; i >= 0; i--) {
+          const tc = state.toolCalls[i];
+          if (tc.status === "needs_confirmation" && tc.name === newCall.name) {
+            return {
+              ...state,
+              toolCalls: state.toolCalls.map((t, idx) =>
+                idx === i ? newCall : t,
+              ),
+            };
+          }
+        }
+      }
+      return { ...state, toolCalls: [...state.toolCalls, newCall] };
+    }
 
     case "TOOL_CALL_RESULT":
       return {

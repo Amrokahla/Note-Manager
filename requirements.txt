@@ -5,6 +5,3 @@ ollama
 google-genai
 python-dotenv
 numpy
-pytest
-httpx
-rich

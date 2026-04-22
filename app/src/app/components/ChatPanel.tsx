@@ -14,8 +14,11 @@ interface Props {
   dispatch: Dispatch<Action>;
 }
 
+const MIN_RUNNING_MS = 450;
+
 export default function ChatPanel({ state, dispatch }: Props) {
   const lastSent = useRef<string | null>(null);
+  const toolStartTimes = useRef<Map<string, number>>(new Map());
 
   async function submit(text: string) {
     if (!state.sessionId) return;
@@ -28,15 +31,24 @@ export default function ChatPanel({ state, dispatch }: Props) {
 
     await sendMessage(state.sessionId, text, turnId, state.model, {
       onUserEcho: () => {},
-      onToolCall: (call) => dispatch({ type: "TOOL_CALL_START", call }),
-      onToolResult: (r) =>
-        dispatch({
-          type: "TOOL_CALL_RESULT",
-          id: r.id,
-          status: r.status,
-          message: r.message,
-          errorCode: r.errorCode,
-        }),
+      onToolCall: (call) => {
+        toolStartTimes.current.set(call.id, Date.now());
+        dispatch({ type: "TOOL_CALL_START", call });
+      },
+      onToolResult: (r) => {
+        const apply = () =>
+          dispatch({
+            type: "TOOL_CALL_RESULT",
+            id: r.id,
+            status: r.status,
+            message: r.message,
+            errorCode: r.errorCode,
+          });
+        const started = toolStartTimes.current.get(r.id);
+        const wait = started ? MIN_RUNNING_MS - (Date.now() - started) : 0;
+        if (wait > 0) setTimeout(apply, wait);
+        else apply();
+      },
       onAssistantDelta: (delta) =>
         dispatch({ type: "ASSISTANT_DELTA", content: delta, turnId }),
       onAssistant: (content) =>

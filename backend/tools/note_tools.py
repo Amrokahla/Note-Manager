@@ -54,10 +54,25 @@ def _add_note(raw: dict) -> ToolResult:
 
 def _list_notes(raw: dict) -> ToolResult:
     args = ListNotesArgs.model_validate(raw)
-    results = note_service.list_notes(tag=args.tag, limit=args.limit)
+    results = note_service.list_notes(
+        tag=args.tag,
+        limit=args.limit,
+        date_from=args.date_from,
+        date_to=args.date_to,
+    )
+    filters: list[str] = []
+    if args.tag:
+        filters.append(f"tagged '{args.tag}'")
+    if args.date_from or args.date_to:
+        rng = (
+            f"from {args.date_from.date().isoformat()} " if args.date_from else "up to "
+        )
+        if args.date_to:
+            rng += f"to {args.date_to.date().isoformat()}"
+        filters.append(rng.strip())
     msg = (
-        f"Found {len(results)} note(s) tagged '{args.tag}'."
-        if args.tag
+        f"Found {len(results)} note(s) " + " and ".join(filters) + "."
+        if filters
         else f"Listed {len(results)} recent note(s)."
     )
     return ToolResult(

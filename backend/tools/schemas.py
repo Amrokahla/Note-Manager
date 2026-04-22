@@ -145,9 +145,13 @@ TOOL_DEFS: list[dict] = [
     _tool(
         "list_notes",
         (
-            "List recent notes, optionally filtered by tag. Use for 'show my "
-            "notes', 'list all notes', 'what notes do I have', 'notes tagged "
-            "X'. Default limit=10, max=50. Pass `tag` to filter; omit for all."
+            "List recent notes, optionally filtered by tag and/or a creation "
+            "date range. Use for 'show my notes', 'list all notes', 'notes "
+            "tagged X', 'what did I write last week', 'notes from yesterday'. "
+            "Default limit=10, max=50. Combine `tag` with `date_from`/`date_to` "
+            "(ISO-8601 dates, e.g. '2026-04-15') as needed. For temporal "
+            "phrases, compute dates relative to today's date in the (context) "
+            "line — do not ask the user what today is."
         ),
         ListNotesArgs,
     ),

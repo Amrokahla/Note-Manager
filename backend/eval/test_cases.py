@@ -125,11 +125,26 @@ def _note_exists_with(title_substr: str) -> bool:
 
 def _seed(title: str, description: str, tag: str | None = None) -> None:
     """Seed a note directly (bypassing the agent) to set up scenarios."""
-    from datetime import datetime, timezone
-
-    from backend.services.note_service import create_note  # local import so we use the real embed path
+    from backend.services.note_service import create_note
     create_note(title, description, tag)
-    _ = datetime.now(timezone.utc)  # timestamp touch
+
+
+def _backdate_note(title_substr: str, days_ago: int) -> None:
+    """Push the latest note matching `title_substr` back by N days. Used to build
+    date-range scenarios where we need a deterministic temporal spread."""
+    from datetime import datetime, timedelta, timezone
+
+    past = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+    conn = sqlite3.connect(settings.db_path)
+    try:
+        conn.execute(
+            "UPDATE notes SET created_at = ?, updated_at = ? "
+            "WHERE lower(title) LIKE ?",
+            (past, past, f"%{title_substr.lower()}%"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @dataclass
@@ -138,6 +153,7 @@ class Turn:
     expect_tool: str | None = None
     expect_args_contains: dict | None = None
     expect_reply_contains: str | None = None
+    expect_reply_excludes: str | None = None
     expect_status: str | None = None
     expect_no_tool: bool = False
     db_check: Callable[[], bool] | None = None
@@ -148,6 +164,7 @@ class Scenario:
     name: str
     tags: list[str]
     seeds: list[tuple[str, str, str | None]] = field(default_factory=list)
+    post_seed: Callable[[], None] | None = None
     turns: list[Turn] = field(default_factory=list)
 
 
@@ -288,6 +305,27 @@ SCENARIOS: list[Scenario] = [
         ],
     ),
     Scenario(
+        name="14_date_range_search",
+        tags=["H"],
+        seeds=[
+            ("Legacy cubicle plan", "old office layout from years ago", "office"),
+            ("Finance sync recap", "synced with finance last week", "meeting"),
+            ("Today scratch note", "quick scratch note from today", None),
+        ],
+        post_seed=lambda: (
+            _backdate_note("legacy cubicle plan", 45),
+            _backdate_note("finance sync", 7),
+        ),
+        turns=[
+            Turn(
+                user="what notes did I write in the last 14 days?",
+                expect_tool="list_notes",
+                expect_reply_contains="finance",
+                expect_reply_excludes="legacy cubicle",
+            ),
+        ],
+    ),
+    Scenario(
         name="15_tool_loop_guard",
         tags=["E"],
         turns=[
@@ -302,8 +340,6 @@ SCENARIOS: list[Scenario] = [
 SKIPPED: list[tuple[str, str]] = [
     ("12_contradiction_probe",
      "Requires model reasoning judgment; no stable automated assertion."),
-    ("14_date_range_search",
-     "Not supported by current SearchNotesArgs (no date_from/date_to). Tool set was redesigned."),
 ]
 
 
@@ -352,6 +388,9 @@ def _assert_turn(turn: Turn, r: TurnResult) -> tuple[bool, str]:
     if turn.expect_reply_contains:
         if turn.expect_reply_contains.lower() not in r.reply.lower():
             return False, f"reply missing {turn.expect_reply_contains!r}: {r.reply!r}"
+    if turn.expect_reply_excludes:
+        if turn.expect_reply_excludes.lower() in r.reply.lower():
+            return False, f"reply unexpectedly contained {turn.expect_reply_excludes!r}"
     if turn.db_check is not None and not turn.db_check():
         return False, "db_check failed"
     return True, ""
@@ -361,6 +400,8 @@ def run_scenario(sc: Scenario) -> dict[str, Any]:
     _clear_db()
     for t, d, tag in sc.seeds:
         _seed(t, d, tag)
+    if sc.post_seed is not None:
+        sc.post_seed()
 
     sid = f"eval-{sc.name}-{uuid.uuid4().hex[:6]}"
     details: list[dict[str, Any]] = []

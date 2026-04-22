@@ -161,27 +161,35 @@ def delete_note(note_id: int) -> bool:
         return cur.rowcount > 0
 
 
-def list_notes(tag: str | None = None, limit: int = 10) -> list[NoteSummary]:
+def list_notes(
+    tag: str | None = None,
+    limit: int = 10,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+) -> list[NoteSummary]:
     norm_tag = normalize_tag(tag) if tag else None
+    where_parts: list[str] = []
+    args: list = []
+    if norm_tag is not None:
+        where_parts.append("tag = ?")
+        args.append(norm_tag)
+    if date_from is not None:
+        where_parts.append("created_at >= ?")
+        args.append(date_from.isoformat())
+    if date_to is not None:
+        where_parts.append("created_at <= ?")
+        args.append(date_to.isoformat())
+
+    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    sql = (
+        "SELECT id, title, description, tag, updated_at "
+        f"FROM notes {where_sql} "
+        "ORDER BY updated_at DESC LIMIT ?"
+    )
+    args.append(limit)
     with tx() as conn:
-        if norm_tag is not None:
-            rows = conn.execute(
-                """
-                SELECT id, title, description, tag, updated_at
-                FROM notes WHERE tag = ?
-                ORDER BY updated_at DESC LIMIT ?
-                """,
-                (norm_tag, limit),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                """
-                SELECT id, title, description, tag, updated_at
-                FROM notes ORDER BY updated_at DESC LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
-        return [_row_to_summary(r) for r in rows]
+        rows = conn.execute(sql, args).fetchall()
+    return [_row_to_summary(r) for r in rows]
 
 
 def list_tags(limit: int = 4) -> list[TagCount]:

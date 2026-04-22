@@ -1,7 +1,5 @@
 # Note Agent
 
-![Chat preview — the agent saves a meeting note while the tool-call panel shows add_note and list_notes firing.](docs/media/chat-preview.png)
-
 A conversational note-taking agent. The LLM calls typed tools to add, search, edit, and delete notes in a local SQLite database, and a Next.js UI renders the chat alongside every tool call the agent makes. Runs in **multi-user mode**: every note is owned by exactly one user and scoped server-side.
 
 > 📐 **Why these choices?** Every design decision is captured one-sentence-apiece in [`docs/DESIGN.md`](docs/DESIGN.md).

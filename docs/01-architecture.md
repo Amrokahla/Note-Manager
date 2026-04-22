@@ -370,22 +370,24 @@ backend/
 ├── main.py                  ← HTTP layer (FastAPI)
 ├── config.py                ← frozen Settings dataclass
 ├── agent/
-│   ├── intent_parser.py     ← orchestrator loop + intent/commit gates
+│   ├── intent_parser.py     ← orchestrator loop + intent/commit gates + retry-on-empty
 │   ├── conversation_state.py← SessionStore, SessionState, context line
 │   ├── prompts.py           ← SYSTEM_PROMPT (single source of truth)
 │   ├── llm_handler.py       ← provider dispatcher (MODEL_OPTIONS)
 │   ├── llm_ollama.py        ← Ollama provider
-│   ├── llm_gemini.py        ← Gemini provider (schema + message translation)
+│   ├── llm_gemini.py        ← Gemini provider (schema + message translation, Flash thinking off)
 │   └── llm_types.py         ← ToolCall, LLMResponse (normalized)
 ├── tools/
 │   ├── schemas.py           ← Pydantic arg models, ToolResult, TOOL_DEFS
 │   └── note_tools.py        ← dispatcher (execute) — wraps exceptions
 ├── services/
-│   ├── note_service.py      ← CRUD, search, backfill
+│   ├── note_service.py      ← CRUD, search, tag/date list, backfill
 │   ├── embeddings.py        ← nomic-embed-text, cosine, blob (de)serialise
 │   └── models.py            ← Note, NoteSummary, TagCount
-└── db/
-    └── sqlite.py            ← schema, init_db, tx() context manager
+├── db/
+│   └── sqlite.py            ← schema, init_db, tx() context manager
+└── eval/
+    └── test_cases.py        ← SSE-based harness; 14 runnable scenarios
 ```
 
 ## Invariants

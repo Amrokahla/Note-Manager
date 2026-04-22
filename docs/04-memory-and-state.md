@@ -382,6 +382,15 @@ export type Action =
 
 Plain React `useReducer`. No Redux, no Zustand — the state is small and local, and a reducer makes the SSE event stream straightforward to handle (each event maps to exactly one action).
 
+### Tool-Card Merge on Commit
+
+A two-step gated operation (add / update / delete) is **two** real tool calls on the backend — preview with `confirm=false`, then commit with `confirm=true`. Without extra work the UI would render two cards per operation. To collapse them into one:
+
+- The backend's `tool_call` SSE frame carries `continues_pending: true` when the call targets a tool name that currently has a pending confirmation on the session (`state.pending_confirmation`).
+- The frontend's `TOOL_CALL_START` reducer case scans backwards for the most recent `needs_confirmation` card of the same tool name. If found and `continuesPending` is set, it **replaces** that card in place instead of appending a new one. The badge transitions `confirm?` → `running` → `ok` on one card.
+
+Non-continuation calls (search / list / get) always append — they don't claim an existing card.
+
 ### The `turnId` Trick
 
 Every user message is tagged with a freshly-generated `turnId` (a client UUID). The assistant's streamed deltas carry the same `turnId`, so the `ASSISTANT_DELTA` reducer branch can find the current assistant bubble for this turn and append to it:

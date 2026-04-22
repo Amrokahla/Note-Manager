@@ -25,7 +25,7 @@ These are the rules the code is built around. They are worth holding in mind whi
 │ Tool            │ Purpose                                                    │
 ├─────────────────┼────────────────────────────────────────────────────────────┤
 │ add_note        │ Create a new note (two-step: preview → commit)             │
-│ list_notes      │ Recent notes, optionally filtered by tag                   │
+│ list_notes      │ Recent notes, optionally filtered by tag and/or created_at │
 │ list_tags       │ Top-N tags by usage count                                  │
 │ search_notes    │ Semantic search (cosine similarity, threshold 0.35)        │
 │ get_note        │ Fetch one note by integer id                               │
@@ -524,6 +524,23 @@ ToolResult(ok=true, data=[NoteSummary, NoteSummary, ...])
 LLM formats: 3-bullet block per note (Title / Description / Tag), no ids.
 ```
 
+`list_notes` also accepts **`date_from` / `date_to`** for temporal queries — "what did I write last week?" resolves to `list_notes(date_from=..., date_to=...)` using today's date from the `(context)` line. Tag and date filters compose; the service builds a dynamic `WHERE` over `created_at` on the same single-table index.
+
+```
+USER: "what notes did I write in the last 14 days?"
+   │
+   ▼
+LLM computes relative dates from (context) → emits:
+  list_notes(date_from="2026-04-08", date_to="2026-04-22")
+   │
+   ▼
+service:  WHERE created_at >= ? AND created_at <= ?
+          ORDER BY updated_at DESC LIMIT 10
+   │
+   ▼
+Only notes in the window come back; the LLM renders them in the 3-bullet format.
+```
+
 ### `list_tags` — Suggestion During Add Flow
 
 When the user adds a note without specifying a tag, the prompt instructs the model to call `list_tags(4)` and offer the existing tags so the user can reuse rather than create. This keeps the tag vocabulary compact.
@@ -593,13 +610,20 @@ This is also stored into the session history so subsequent turns see that this t
 
 ### Empty-Content Safety Net
 
-Sometimes a provider returns `kind="message"` with empty `content`. Without a guard the UI would render a blank bubble. The orchestrator substitutes a short nudge:
+Sometimes a provider returns `kind="message"` with empty `content` — Gemini 2.5 Flash has been observed doing this on short tool-enabled prompts, for example. The orchestrator retries the LLM call once (without streaming, so no duplicate delta tokens), then falls back to a friendly nudge only if the retry also comes back empty:
 
 ```python
-if not reply:
-    logger.warning("Empty assistant content from model=%s session=%s", model, session_id)
-    reply = "Sorry, I didn't quite catch that. Could you rephrase?"
+if resp.kind == "message" and not (resp.content or "").strip():
+    logger.warning("Empty response from model=%s ... — retrying once", ...)
+    resp = llm_handler.chat(messages, tools=tools_for_turn, on_delta=None, model=model)
+
+if resp.kind == "message":
+    reply = (resp.content or "").strip()
+    if not reply:
+        reply = "Sorry, I didn't quite catch that. Could you rephrase?"
 ```
+
+If the retry returns tool calls, the loop's tool-call branch picks them up naturally — the retry isn't locked to the `message` path.
 
 ## Why It Works
 

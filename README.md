@@ -5,7 +5,7 @@ A conversational note-taking agent. The LLM calls typed tools to add, search, ed
 ## Stack
 
 - **Backend** — FastAPI + Pydantic v2, raw SQLite, streaming `/chat` via SSE.
-- **Agent** — pluggable LLM providers (Ollama for local `llama3.x`, Google Gemini 2.5 Pro / Flash). Seven tools, two-step confirmation for add / update / delete, semantic search via `nomic-embed-text`.
+- **Agent** — pluggable LLM providers (Ollama for local `llama3.x`, Google Gemini 2.5 Pro / Flash). Seven tools, two-step confirmation for add / update / delete, semantic search via `nomic-embed-text`, and a date-range filter on `list_notes`.
 - **Frontend** — Next.js 16 (App Router), React 19, Tailwind v4. 70/30 chat-vs-tool-calls layout.
 
 ## Prerequisites
@@ -81,3 +81,15 @@ npm run dev
 ```
 
 Open <http://localhost:3000>. Pick your model from the header dropdown and start talking to your notes.
+
+## Evaluation Harness
+
+With the backend running, execute the 14 scripted scenarios from `backend/eval/test_cases.py`:
+
+```bash
+source venv/bin/activate
+python -m backend.eval.test_cases                # all scenarios
+python -m backend.eval.test_cases --only 07 14   # subset by name prefix
+```
+
+Each scenario clears the `notes` table, optionally seeds rows (with backdated `created_at` where needed), replays a short conversation against the live agent, and asserts the tool sequence + final status + any DB conditions. One plan scenario (#12, contradiction probe) stays skipped — its assertion is subjective.

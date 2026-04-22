@@ -26,7 +26,7 @@ The codebase uses **Pydantic v2** for anything that crosses an external boundary
 │                                                                              │
 │  Tool arguments (backend/tools/schemas.py)                                   │
 │     AddNoteArgs     { title, description, tag?, confirm }                    │
-│     ListNotesArgs   { tag?, limit }                                          │
+│     ListNotesArgs   { tag?, limit, date_from?, date_to? }                    │
 │     ListTagsArgs    { limit }                                                │
 │     SearchNotesArgs { query, limit }                                         │
 │     GetNoteArgs     { note_id }                                              │
@@ -83,6 +83,16 @@ class AddNoteArgs(BaseModel):
     confirm: bool = Field(default=False, description=...)
 
 
+class ListNotesArgs(BaseModel):
+    tag: str | None = Field(default=None, description="Optional tag filter.")
+    limit: int = Field(default=10, ge=1, le=50)
+    date_from: datetime | None = Field(
+        default=None,
+        description="Lower bound on created_at (inclusive); ISO-8601 date like '2026-04-15'.",
+    )
+    date_to: datetime | None = Field(default=None, description="Upper bound on created_at (inclusive).")
+
+
 class SearchNotesArgs(BaseModel):
     query: str = Field(..., min_length=1, description="Natural-language query for semantic search.")
     limit: int = Field(default=5, ge=1, le=20)
@@ -105,6 +115,8 @@ class DeleteNoteArgs(BaseModel):
 **`confirm` is the two-step gate**. It is a first-class field on every destructive or creative tool. The LLM must pass `confirm=false` first (the server returns a preview), then `confirm=true` on a second call after the user has explicitly agreed. See [03 - Note Agent](./03-note-agent.md) for the flow.
 
 **`clear_tag` disambiguates "don't touch this field" from "remove the value"** in `UpdateNoteArgs`. Passing `tag=None` means "leave the current tag alone"; passing `clear_tag=True` means "set it to NULL". Without the boolean, `None` would be ambiguous.
+
+**Date-range on `list_notes`.** The `date_from` / `date_to` fields accept ISO-8601 strings (Pydantic auto-parses them into `datetime`). The service filters on the note's `created_at` — the question is "what did I write in this window", not "what did I edit". Empty corpus returns an empty list with a friendly message; no zero-result error.
 
 ### Small-Model Robustness: `_coerce_json_list`
 
@@ -325,6 +337,18 @@ def _safety_block_none() -> list[genai_types.SafetySetting]:
     ]
     return [genai_types.SafetySetting(category=c, threshold="BLOCK_NONE") for c in categories]
 ```
+
+### Thinking Config (Flash only)
+
+Gemini 2.5 Flash has a thinking budget enabled by default. On short tool-enabled prompts with a big system instruction it occasionally burns the budget and returns neither text nor a tool call — empty response. The provider disables thinking for Flash specifically:
+
+```python
+thinking_config = (
+    genai_types.ThinkingConfig(thinking_budget=0) if "flash" in model.lower() else None
+)
+```
+
+Pro keeps `None` (it's always-on thinking and can't be disabled via the SDK). See [`../docs/03-note-agent.md#why-it-works`](./03-note-agent.md) for the orchestrator-level retry-on-empty that backstops all providers.
 
 ### Error Mapping
 

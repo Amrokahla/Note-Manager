@@ -158,7 +158,63 @@ The loop runs the tool, puts the result in `state.messages`, and calls the model
 
 **Problem.** Small models (notably llama3.2 3B) cannot resist firing a tool when tools are present in the context, even when the user says "hi". The system prompt steers the reply text but not the decision to call.
 
-**Fix.** Decide *per turn, before the LLM is called* whether tools should even be exposed. If the user's message doesn't look like a note operation, pass `tools=[]` to the provider — the model physically cannot fire a tool.
+**Fix.** Decide *per turn, before the main LLM call*, whether tools should even be exposed. If the decision is "no", pass `tools=[]` to the provider — the model physically cannot fire a tool.
+
+The gate is **per-provider**. Gemini is a capable enough classifier to make the decision itself, so we use it rather than a hand-maintained keyword list. Ollama (the small-model path) keeps the regex because a classifier call would itself risk reflex tool-calls.
+
+```python
+def _gate_allow_tools(user_text: str, model: str, state: SessionState) -> bool:
+    # A pending confirmation always overrides — the user's "yes/no/modify"
+    # must be able to reach the tool.
+    if state.pending_confirmation:
+        return True
+    provider = llm_handler.MODEL_OPTIONS.get(model, ("ollama", None))[0]
+    if provider == "gemini":
+        return _classify_intent_llm(user_text, model)
+    return looks_like_note_op(user_text)
+```
+
+### Gemini branch — `_classify_intent_llm`
+
+A separate, tool-less LLM call with a tight classification prompt. The output must be one of two words:
+
+```python
+_INTENT_CLASSIFIER_SYSTEM = (
+    "You are a binary classifier for a note-taking assistant. Decide whether "
+    "the user's message is asking to perform a note operation — adding, "
+    "updating, deleting, searching, listing, tagging, or referencing a note — "
+    "or is something else (greeting, small talk, meta question, off-topic). "
+    'Reply with exactly one lowercase word: "note_op" or "other". '
+    "No punctuation, no preamble, no explanation."
+)
+
+def _classify_intent_llm(user_text: str, model: str) -> bool:
+    try:
+        resp = llm_handler.chat(
+            messages=[
+                {"role": "system", "content": _INTENT_CLASSIFIER_SYSTEM},
+                {"role": "user", "content": user_text},
+            ],
+            tools=[],          # classifier never sees the tool surface
+            on_delta=None,
+            model=model,
+        )
+    except Exception:
+        return looks_like_note_op(user_text)   # transport failure → regex
+
+    text = (resp.content or "").strip().lower()
+    if text.startswith("note"):  return True
+    if text.startswith("other"): return False
+    return looks_like_note_op(user_text)       # unrecognized → regex
+```
+
+Three guard rails built in:
+
+1. **`tools=[]`** — the classifier itself cannot fire a tool accidentally.
+2. **Transport error → regex fallback.** A broken API key, a rate limit, a timeout: the regex takes over, the turn still runs.
+3. **Unrecognized reply → regex fallback.** Gemini *almost always* obeys a tight classification prompt; if it doesn't, we degrade gracefully rather than silently mis-gating.
+
+### Ollama branch — regex
 
 ```python
 _NOTE_KEYWORD_PATTERN = re.compile(
@@ -181,12 +237,23 @@ def looks_like_note_op(text: str) -> bool:
     return bool(_NOTE_KEYWORD_PATTERN.search(text))
 ```
 
-**Failure-mode tradeoffs.** The heuristic errs toward allowing tools ("false positive = one spurious tool call the prompt rules moderate"; "false negative = user has to rephrase"). A pending confirmation overrides the gate — mid-confirmation, tools must stay available so "yes" can trigger the commit.
+### Why not LLM-classify for Ollama too?
 
-```python
-allow_tools = looks_like_note_op(user_text) or bool(state.pending_confirmation)
-tools_for_turn = None if allow_tools else []   # None → use TOOL_DEFS, [] → no tools
-```
+Two reasons:
+
+- **Cost/latency asymmetry.** Gemini Flash classifier round-trip is ~500 ms and sub-cent. Local llama3.2 3B needs the full model load per turn; the classifier call doubles the per-turn latency for a weaker signal.
+- **Reflex problem compounds.** A 3B model is already prone to reflex tool-calling; adding a classification *call* doesn't make that better — it just means the wrong behaviour happens twice. The regex is blunt but deterministic.
+
+### Failure modes
+
+| Path | False positive | False negative |
+|---|---|---|
+| Gemini classifier | Gemini labels a genuine greeting as `note_op` — LLM still has latitude to respond in text (system prompt covers greetings). One unnecessary tool exposure at worst. |
+| Gemini classifier | Gemini labels a real note op as `other` — tools not exposed, LLM replies in text, user has to rephrase. Rare. |
+| Ollama regex | Keyword match on an off-topic turn — same as Gemini false positive above. |
+| Ollama regex | Missed keyword — tools not exposed, user rephrases. The keyword list is intentionally broad to minimise this. |
+
+A pending confirmation overrides both branches — mid-confirmation, tools must stay available so "yes" can trigger the commit.
 
 ## The Commit-Intent Gate
 

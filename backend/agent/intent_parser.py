@@ -87,6 +87,67 @@ def looks_like_note_op(text: str) -> bool:
     return bool(_NOTE_KEYWORD_PATTERN.search(text))
 
 
+_INTENT_CLASSIFIER_SYSTEM = (
+    "You are a binary classifier for a note-taking assistant. Decide whether "
+    "the user's message is asking to perform a note operation — adding, "
+    "updating, deleting, searching, listing, tagging, or referencing a note — "
+    "or is something else (greeting, small talk, meta question, off-topic). "
+    'Reply with exactly one lowercase word: "note_op" or "other". '
+    "No punctuation, no preamble, no explanation."
+)
+
+
+def _classify_intent_llm(user_text: str, model: str) -> bool:
+    """LLM-based intent gate for providers reliable enough to run one.
+
+    On any transport error or unrecognized reply, falls back to the keyword
+    regex so the gate never fails-open into silence.
+    """
+    try:
+        resp = llm_handler.chat(
+            messages=[
+                {"role": "system", "content": _INTENT_CLASSIFIER_SYSTEM},
+                {"role": "user", "content": user_text},
+            ],
+            tools=[],
+            on_delta=None,
+            model=model,
+        )
+    except Exception as e:
+        logger.warning(
+            "Intent classifier failed (%s) — falling back to regex", e
+        )
+        return looks_like_note_op(user_text)
+
+    text = (resp.content or "").strip().lower()
+    if text.startswith("note"):
+        return True
+    if text.startswith("other"):
+        return False
+    logger.warning(
+        "Intent classifier returned unrecognized %r — falling back to regex",
+        text,
+    )
+    return looks_like_note_op(user_text)
+
+
+def _gate_allow_tools(user_text: str, model: str, state: SessionState) -> bool:
+    """Decide whether to expose tools to the LLM this turn.
+
+    • A pending confirmation always overrides (the user's 'yes/no/modify'
+      must be able to reach the tool).
+    • Gemini uses an LLM classifier — smarter, paid with one extra small call.
+    • Ollama uses the regex — small models can't be trusted with a classifier
+      call AND tool-enabled main call on the same prompt.
+    """
+    if state.pending_confirmation:
+        return True
+    provider = llm_handler.MODEL_OPTIONS.get(model, ("ollama", None))[0]
+    if provider == "gemini":
+        return _classify_intent_llm(user_text, model)
+    return looks_like_note_op(user_text)
+
+
 store: SessionStore = SessionStore()
 
 _FALLBACK_REPLY = (
@@ -211,7 +272,7 @@ def handle_user_message(
     state.messages.append({"role": "user", "content": user_text})
     _emit("user_echo", {"message": user_text})
 
-    allow_tools = looks_like_note_op(user_text) or bool(state.pending_confirmation)
+    allow_tools = _gate_allow_tools(user_text, model, state)
     tools_for_turn: list[dict] | None = None if allow_tools else []
     if not allow_tools:
         logger.info(

@@ -8,12 +8,15 @@ import time
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable
 
 from backend.config import settings
 
 BACKEND = "http://localhost:8000"
 MODEL = "gemini-2.5-flash"
+REPORT_PATH = Path(__file__).parent / "report.md"
 
 
 @dataclass
@@ -412,8 +415,11 @@ def run_scenario(sc: Scenario) -> dict[str, Any]:
             r = _post_stream(sid, turn.user)
         except Exception as e:
             passed = False
-            details.append({"turn": idx, "user": turn.user, "ok": False,
-                            "reason": f"transport error: {e}"})
+            details.append({
+                "turn": idx, "user": turn.user, "ok": False,
+                "reason": f"transport error: {e}",
+                "tools": [], "reply": "",
+            })
             break
         ok, reason = _assert_turn(turn, r)
         details.append({
@@ -429,6 +435,51 @@ def run_scenario(sc: Scenario) -> dict[str, Any]:
             break
 
     return {"name": sc.name, "tags": sc.tags, "passed": passed, "turns": details}
+
+
+def _render_report(results: list[dict[str, Any]], elapsed: float, model: str) -> str:
+    """Build the markdown report body; shared by stdout print and file write."""
+    total = len(results) + len(SKIPPED)
+    passed = sum(1 for r in results if r["passed"])
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    lines: list[str] = []
+    lines.append(f"# Eval Report — {now}")
+    lines.append("")
+    lines.append(f"- Model: `{model}`")
+    lines.append(f"- Pass rate: **{passed}/{len(results)}** run, {len(SKIPPED)} skipped, {total} total")
+    lines.append(f"- Duration: {elapsed:.1f}s")
+    lines.append("")
+    lines.append("| # | Scenario | Tags | Result | Notes |")
+    lines.append("|---|----------|------|--------|-------|")
+    for r in results:
+        status = "PASS" if r["passed"] else "FAIL"
+        first_fail = next((t for t in r["turns"] if not t["ok"]), None)
+        note = first_fail["reason"] if first_fail else ""
+        lines.append(
+            f"| {r['name'][:2]} | `{r['name']}` | {','.join(r['tags'])} | "
+            f"{status} | {note} |"
+        )
+    for name, reason in SKIPPED:
+        lines.append(f"| {name[:2]} | `{name}` | — | SKIP | {reason} |")
+
+    failures = [r for r in results if not r["passed"]]
+    if failures:
+        lines.append("")
+        lines.append("## Failures")
+        for r in failures:
+            lines.append("")
+            lines.append(f"### `{r['name']}`")
+            for t in r["turns"]:
+                tag = "PASS" if t["ok"] else "FAIL"
+                lines.append(f"- **[{tag}] turn {t['turn']}** — {t['user']!r}")
+                lines.append(f"  - tools: `{t.get('tools', [])}`")
+                lines.append(f"  - reply: `{t.get('reply', '')!r}`")
+                if not t["ok"]:
+                    lines.append(f"  - reason: {t['reason']}")
+
+    lines.append("")
+    return "\n".join(lines)
 
 
 def _print_report(results: list[dict[str, Any]]) -> None:
@@ -454,8 +505,8 @@ def _print_report(results: list[dict[str, Any]]) -> None:
             for t in r["turns"]:
                 tag = "PASS" if t["ok"] else "FAIL"
                 print(f"  [{tag}] turn {t['turn']}: {t['user']!r}")
-                print(f"         tools: {t['tools']}")
-                print(f"         reply: {t['reply']!r}")
+                print(f"         tools: {t.get('tools', [])}")
+                print(f"         reply: {t.get('reply', '')!r}")
                 if not t["ok"]:
                     print(f"         reason: {t['reason']}")
             print()
@@ -472,8 +523,11 @@ def main() -> int:
 
     started = time.time()
     results = [run_scenario(sc) for sc in scenarios]
-    print(f"\nCompleted {len(results)} scenario(s) in {time.time() - started:.1f}s")
+    elapsed = time.time() - started
+    print(f"\nCompleted {len(results)} scenario(s) in {elapsed:.1f}s")
     _print_report(results)
+    REPORT_PATH.write_text(_render_report(results, elapsed, MODEL))
+    print(f"\nWrote {REPORT_PATH.relative_to(Path.cwd()) if REPORT_PATH.is_relative_to(Path.cwd()) else REPORT_PATH}")
     return 0 if all(r["passed"] for r in results) else 1
 
 

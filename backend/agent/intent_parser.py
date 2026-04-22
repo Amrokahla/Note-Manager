@@ -300,12 +300,26 @@ def handle_user_message(
         def _forward_delta(delta: str) -> None:
             _emit("assistant_delta", {"content": delta})
 
-        resp = llm_handler.chat(
-            messages,
-            tools=tools_for_turn,
-            on_delta=_forward_delta,
-            model=model,
-        )
+        try:
+            resp = llm_handler.chat(
+                messages,
+                tools=tools_for_turn,
+                on_delta=_forward_delta,
+                model=model,
+            )
+        except Exception as e:
+            logger.warning(
+                "Provider error from model=%s session=%s (%s) — retrying once",
+                model,
+                session_id,
+                e,
+            )
+            resp = llm_handler.chat(
+                messages,
+                tools=tools_for_turn,
+                on_delta=None,
+                model=model,
+            )
 
         if resp.kind == "message" and not (resp.content or "").strip():
             logger.warning(

@@ -2,6 +2,17 @@
 
 Every tool the LLM can call, with its arguments, return envelope, error codes, and a representative call / response pair. The canonical definitions live in `backend/tools/schemas.py` (Pydantic models + `TOOL_DEFS`); this document is the readable mirror — if something drifts, `schemas.py` wins.
 
+## Per-User Scoping
+
+All note operations are automatically scoped to the **authenticated user** — the `user_id` is resolved from the JWT by FastAPI's `current_user` dependency and passed as a keyword-only argument through `note_tools.execute(...)` into `note_service`. Every SQL statement that touches `notes` filters on `WHERE user_id = ?`.
+
+Two consequences for tool design:
+
+1. **`user_id` is never in the LLM-facing schema.** The model can't accidentally (or maliciously) operate on another user's notes by passing a different id — the argument is out of its reach entirely.
+2. **Every id the model sees came from that user's own notes.** `get_note` / `update_note` / `delete_note` accept a `note_id`, but the only ids the LLM ever has in context were surfaced by a prior tool result scoped to the same user.
+
+See [`05-authentication.md`](05-authentication.md) for the full threading model and the grep-rule invariant that enforces it.
+
 ## The Uniform Result Envelope
 
 Every tool returns a `ToolResult`:

@@ -43,6 +43,11 @@ services:
       SEARCH_FALLBACK_LIMIT: "3"
       OLLAMA_MODEL: ${OLLAMA_CHAT_MODEL:-llama3.2}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # `:?` fails `docker compose up` fast if AUTH_SECRET is missing —
+      # matches the app's refusal to boot without a signing key.
+      AUTH_SECRET: ${AUTH_SECRET:?AUTH_SECRET must be set in .env}
+      AUTH_TOKEN_TTL_MINUTES: ${AUTH_TOKEN_TTL_MINUTES:-10080}
+      AUTH_BCRYPT_COST: ${AUTH_BCRYPT_COST:-12}
     volumes:
       - notes:/data
     ports:

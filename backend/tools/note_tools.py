@@ -22,7 +22,7 @@ from backend.tools.schemas import (
 logger = logging.getLogger(__name__)
 
 
-def _add_note(raw: dict) -> ToolResult:
+def _add_note(raw: dict, *, user_id: int) -> ToolResult:
     args = AddNoteArgs.model_validate(raw)
 
     if not args.confirm:
@@ -44,7 +44,9 @@ def _add_note(raw: dict) -> ToolResult:
             },
         )
 
-    note = note_service.create_note(args.title, args.description, args.tag)
+    note = note_service.create_note(
+        args.title, args.description, args.tag, user_id=user_id
+    )
     return ToolResult(
         ok=True,
         message=f"Created note #{note.id} '{note.title}'.",
@@ -52,13 +54,14 @@ def _add_note(raw: dict) -> ToolResult:
     )
 
 
-def _list_notes(raw: dict) -> ToolResult:
+def _list_notes(raw: dict, *, user_id: int) -> ToolResult:
     args = ListNotesArgs.model_validate(raw)
     results = note_service.list_notes(
         tag=args.tag,
         limit=args.limit,
         date_from=args.date_from,
         date_to=args.date_to,
+        user_id=user_id,
     )
     filters: list[str] = []
     if args.tag:
@@ -82,9 +85,9 @@ def _list_notes(raw: dict) -> ToolResult:
     )
 
 
-def _list_tags(raw: dict) -> ToolResult:
+def _list_tags(raw: dict, *, user_id: int) -> ToolResult:
     args = ListTagsArgs.model_validate(raw)
-    tags = note_service.list_tags(limit=args.limit)
+    tags = note_service.list_tags(limit=args.limit, user_id=user_id)
     return ToolResult(
         ok=True,
         message=f"Top {len(tags)} tag(s).",
@@ -92,11 +95,11 @@ def _list_tags(raw: dict) -> ToolResult:
     )
 
 
-def _search_notes(raw: dict) -> ToolResult:
+def _search_notes(raw: dict, *, user_id: int) -> ToolResult:
     args = SearchNotesArgs.model_validate(raw)
     try:
         results, above = note_service.search_semantic(
-            query=args.query, limit=args.limit
+            query=args.query, limit=args.limit, user_id=user_id
         )
     except ValueError as e:
         return ToolResult(ok=False, error_code="invalid_arg", message=str(e))
@@ -135,9 +138,9 @@ def _search_notes(raw: dict) -> ToolResult:
     )
 
 
-def _get_note(raw: dict) -> ToolResult:
+def _get_note(raw: dict, *, user_id: int) -> ToolResult:
     args = GetNoteArgs.model_validate(raw)
-    note = note_service.get_note(args.note_id)
+    note = note_service.get_note(args.note_id, user_id=user_id)
     if note is None:
         return ToolResult(
             ok=False,
@@ -194,7 +197,7 @@ def _auto_sync_fields(
     return new_title, new_description
 
 
-def _update_note(raw: dict) -> ToolResult:
+def _update_note(raw: dict, *, user_id: int) -> ToolResult:
     args = UpdateNoteArgs.model_validate(raw)
     if (
         args.title is None
@@ -208,7 +211,7 @@ def _update_note(raw: dict) -> ToolResult:
             message="Nothing to update — pass at least one of title, description, tag, or clear_tag.",
         )
 
-    current = note_service.get_note(args.note_id)
+    current = note_service.get_note(args.note_id, user_id=user_id)
     if current is None:
         return ToolResult(
             ok=False,
@@ -263,6 +266,7 @@ def _update_note(raw: dict) -> ToolResult:
         description=commit_description,
         tag=args.tag,
         clear_tag=args.clear_tag,
+        user_id=user_id,
     )
     if updated is None:
         return ToolResult(
@@ -277,9 +281,9 @@ def _update_note(raw: dict) -> ToolResult:
     )
 
 
-def _delete_note(raw: dict) -> ToolResult:
+def _delete_note(raw: dict, *, user_id: int) -> ToolResult:
     args = DeleteNoteArgs.model_validate(raw)
-    note = note_service.get_note(args.note_id)
+    note = note_service.get_note(args.note_id, user_id=user_id)
     if note is None:
         return ToolResult(
             ok=False,
@@ -299,11 +303,13 @@ def _delete_note(raw: dict) -> ToolResult:
             data={"preview": note.model_dump(mode="json")},
         )
 
-    note_service.delete_note(args.note_id)
+    note_service.delete_note(args.note_id, user_id=user_id)
     return ToolResult(ok=True, message=f"Deleted note #{args.note_id}.")
 
 
-_HANDLERS: dict[str, Callable[[dict], ToolResult]] = {
+_Handler = Callable[..., ToolResult]
+
+_HANDLERS: dict[str, _Handler] = {
     "add_note": _add_note,
     "list_notes": _list_notes,
     "list_tags": _list_tags,
@@ -314,8 +320,8 @@ _HANDLERS: dict[str, Callable[[dict], ToolResult]] = {
 }
 
 
-def execute(name: str, raw_args: dict | None) -> ToolResult:
-    """Run a tool and return a ToolResult. Never raises."""
+def execute(name: str, raw_args: dict | None, *, user_id: int) -> ToolResult:
+    """Run a tool for a specific user. Never raises."""
     handler = _HANDLERS.get(name)
     if handler is None:
         return ToolResult(
@@ -324,7 +330,7 @@ def execute(name: str, raw_args: dict | None) -> ToolResult:
             message=f"Unknown tool: {name!r}.",
         )
     try:
-        return handler(raw_args or {})
+        return handler(raw_args or {}, user_id=user_id)
     except ValidationError as e:
         return ToolResult(
             ok=False,

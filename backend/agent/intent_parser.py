@@ -132,14 +132,7 @@ def _classify_intent_llm(user_text: str, model: str) -> bool:
 
 
 def _gate_allow_tools(user_text: str, model: str, state: SessionState) -> bool:
-    """Decide whether to expose tools to the LLM this turn.
-
-    • A pending confirmation always overrides (the user's 'yes/no/modify'
-      must be able to reach the tool).
-    • Gemini uses an LLM classifier — smarter, paid with one extra small call.
-    • Ollama uses the regex — small models can't be trusted with a classifier
-      call AND tool-enabled main call on the same prompt.
-    """
+    """Decide whether to expose tools to the LLM this turn."""
     if state.pending_confirmation:
         return True
     provider = llm_handler.MODEL_OPTIONS.get(model, ("ollama", None))[0]
@@ -217,6 +210,7 @@ def _run_tool_call(
     state: SessionState,
     call: ToolCall,
     *,
+    user_id: int,
     force_confirm: bool = False,
 ) -> ToolResult:
     """Dispatch one tool call and record everything the next hop needs to see."""
@@ -232,7 +226,7 @@ def _run_tool_call(
             effective_args,
         )
 
-    result = note_tools.execute(call.name, effective_args)
+    result = note_tools.execute(call.name, effective_args, user_id=user_id)
     remember_referenced(state, result)
 
     if result.needs_confirmation:
@@ -263,12 +257,13 @@ def handle_user_message(
     user_text: str,
     emit: EmitFunc | None = None,
     *,
+    user_id: int,
     model: str = llm_handler.DEFAULT_MODEL,
 ) -> TurnResult:
     """Run one user turn through the agent loop, bounded by settings.max_tool_hops."""
     _emit: EmitFunc = emit or (lambda _t, _d: None)
 
-    state = store.get(session_id)
+    state = store.get(session_id, user_id=user_id)
     state.messages.append({"role": "user", "content": user_text})
     _emit("user_echo", {"message": user_text})
 
@@ -368,7 +363,9 @@ def handle_user_message(
                     "continues_pending": continues_pending,
                 },
             )
-            result = _run_tool_call(state, call, force_confirm=force_confirm)
+            result = _run_tool_call(
+                state, call, user_id=user_id, force_confirm=force_confirm
+            )
             _emit("tool_result", _result_payload(tc_id, result))
             turn_calls.append(
                 TurnToolCall(
@@ -389,11 +386,27 @@ def handle_user_message(
 if __name__ == "__main__":  # pragma: no cover
     import uuid
 
-    from backend.db.sqlite import init_db
+    from backend.auth.service import create_user
+    from backend.auth.models import UsernameTakenError
+    from backend.db.migrations import run_migrations
 
-    init_db()
+    run_migrations()
+    username = "cli-user"
+    try:
+        user = create_user(username, "cli-pass-please-change")
+    except UsernameTakenError:
+        from backend.auth.service import authenticate
+        user = authenticate(username, "cli-pass-please-change")
+        if user is None:
+            raise SystemExit(
+                f"User {username!r} already exists but credentials don't match. "
+                "Drop data/notes.db or use the HTTP API."
+            )
     session = str(uuid.uuid4())
-    print(f"Note Agent CLI — session {session[:8]}. Ctrl-D or 'exit' to quit.\n")
+    print(
+        f"Note Agent CLI — user {user.username}, session {session[:8]}. "
+        "Ctrl-D or 'exit' to quit.\n"
+    )
     while True:
         try:
             text = input("you > ").strip()
@@ -404,7 +417,7 @@ if __name__ == "__main__":  # pragma: no cover
             continue
         if text.lower() in {"exit", "quit"}:
             break
-        result = handle_user_message(session, text)
+        result = handle_user_message(session, text, user_id=user.id)
         print(f"bot > {result.reply}\n")
         for tc in result.tool_calls:
             status = "ok" if tc.result.ok else (tc.result.error_code or "fail")

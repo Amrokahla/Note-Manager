@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useReducer } from "react";
+import AuthGate from "./components/AuthGate";
 import ChatPanel from "./components/ChatPanel";
 import Header from "./components/Header";
 import ToolPanel from "./components/ToolPanel";
@@ -9,7 +10,7 @@ import { appReducer, initialState } from "./lib/reducer";
 import { newSessionId } from "./lib/session";
 import type { ModelId } from "./types";
 
-export default function Home() {
+function ChatApp() {
   const [state, dispatch] = useReducer(appReducer, undefined, initialState);
 
   useEffect(() => {
@@ -45,5 +46,13 @@ export default function Home() {
         <ToolPanel toolCalls={state.toolCalls} />
       </div>
     </main>
+  );
+}
+
+export default function Home() {
+  return (
+    <AuthGate>
+      <ChatApp />
+    </AuthGate>
   );
 }

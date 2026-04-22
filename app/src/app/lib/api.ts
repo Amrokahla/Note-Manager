@@ -1,4 +1,5 @@
 import type { ModelId, ToolCallRecord, ToolStatus } from "../types";
+import { clearToken, loadToken } from "./authStorage";
 
 export interface ChatHandlers {
   onUserEcho: (m: string) => void;
@@ -52,15 +53,20 @@ export async function sendMessage(
   handlers: ChatHandlers,
 ): Promise<void> {
   const baseUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+  const token = loadToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "text/event-stream",
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
 
   let res: Response;
   try {
     res = await fetch(`${baseUrl}/chat/stream`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      },
+      headers,
       body: JSON.stringify({ session_id: sessionId, message, model }),
     });
   } catch {
@@ -68,6 +74,18 @@ export async function sendMessage(
       `Couldn't reach the agent at ${baseUrl}. Is the backend running?`,
     );
     handlers.onDone();
+    return;
+  }
+
+  if (res.status === 401) {
+    // Token expired or tampered — drop it and bounce to /login. The user
+    // can re-auth and retry the message.
+    clearToken();
+    handlers.onError("Session expired. Please log in again.");
+    handlers.onDone();
+    if (typeof window !== "undefined") {
+      window.location.href = "/login";
+    }
     return;
   }
 

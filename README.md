@@ -1,18 +1,28 @@
 # Note Agent
 
-A conversational note-taking agent. The LLM calls typed tools to add, search, edit, and delete notes in a local SQLite database, and a Next.js UI renders the chat alongside every tool call the agent makes.
+![Chat preview — the agent saves a meeting note while the tool-call panel shows add_note and list_notes firing.](docs/media/chat-preview.png)
+
+A conversational note-taking agent. The LLM calls typed tools to add, search, edit, and delete notes in a local SQLite database, and a Next.js UI renders the chat alongside every tool call the agent makes. Runs in **multi-user mode**: every note is owned by exactly one user and scoped server-side.
+
+> 📐 **Why these choices?** Every design decision is captured one-sentence-apiece in [`docs/DESIGN.md`](docs/DESIGN.md).
+> 🔧 **What can the agent do?** The seven tool schemas (args, return envelope, error codes, examples) are in [`docs/TOOLS.md`](docs/TOOLS.md).
 
 ## Stack
 
-- **Backend** — FastAPI + Pydantic v2, raw SQLite, streaming `/chat` via SSE.
-- **Agent** — pluggable LLM providers (Ollama for local `llama3.x`, Google Gemini 2.5 Pro / Flash). Seven tools, two-step confirmation for add / update / delete, semantic search via `nomic-embed-text`, and a date-range filter on `list_notes`.
-- **Frontend** — Next.js 16 (App Router), React 19, Tailwind v4. 70/30 chat-vs-tool-calls layout.
+- **Backend** — FastAPI + Pydantic v2, raw SQLite with a versioned migration runner, streaming `/chat` via SSE.
+- **Auth** — username/password registration, bcrypt hashing, JWT bearer tokens (HS256, 7-day default TTL). Every `/chat*` and `/models` call requires a valid token.
+- **Agent** — pluggable LLM providers (Ollama for local `llama3.x`, Google Gemini 2.5 Pro / Flash). Seven tools ([TOOLS.md](docs/TOOLS.md)), two-step confirmation for add / update / delete, semantic search via `nomic-embed-text`, and a date-range filter on `list_notes`.
+- **Frontend** — Next.js 16 (App Router), React 19, Tailwind v4. 70/30 chat-vs-tool-calls layout; `/login` and `/register` route group; `AuthGate` wraps the chat page.
 
 ## Quick start — Docker (recommended)
 
-The shortest path. One command, no host dependencies beyond Docker itself:
+The shortest path. One command after a one-time `.env` step, no host dependencies beyond Docker itself:
 
 ```bash
+cp .env.example .env
+# edit .env — AUTH_SECRET is MANDATORY (the app refuses to boot without one)
+# generate: python -c "import secrets; print(secrets.token_urlsafe(48))"
+# also drop in your GEMINI_API_KEY (see below)
 docker compose up --build
 ```
 
@@ -23,7 +33,9 @@ This brings up four services:
 3. `backend` — FastAPI on port `8000`, waits for `ollama-init` to finish.
 4. `frontend` — Next.js on port `3000`.
 
-Open <http://localhost:3000> once the backend logs `Application startup complete`. Notes persist in a named volume (`notes`) across restarts.
+Open <http://localhost:3000> once the backend logs `Application startup complete`. First visit redirects to `/register` — create a user, log in, start chatting. Notes persist in a named volume (`notes`) across restarts.
+
+`docker-compose.yml` uses `${AUTH_SECRET:?...}` so `docker compose up` fails fast if the variable isn't set in `.env`.
 
 ### Chat model — Gemini (recommended) or local Ollama (opt-in)
 
@@ -69,6 +81,9 @@ cp .env.example .env
 | `SEARCH_THRESHOLD` | `0.35` | Cosine similarity cutoff for matches |
 | `SEARCH_FALLBACK_LIMIT` | `3` | Closest-N returned when no match beats the threshold |
 | `GEMINI_API_KEY` | _(empty)_ | Required only if you pick a Gemini model in the UI |
+| `AUTH_SECRET` | **(required, no default)** | HS256 signing key for JWTs. App refuses to start if empty. Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
+| `AUTH_TOKEN_TTL_MINUTES` | `10080` | JWT lifetime. Default 7 days. |
+| `AUTH_BCRYPT_COST` | `12` | bcrypt work factor. ≈ 250 ms per hash on a laptop. |
 
 ## Alternative — run without Docker
 
@@ -117,7 +132,7 @@ pip install -r requirements.txt
 uvicorn backend.main:app --reload
 ```
 
-Health check: `curl http://localhost:8000/health`.
+The first migration on an empty DB applies automatically via `run_migrations()`. Health check: `curl http://localhost:8000/health`.
 
 **Frontend** (in another terminal):
 
@@ -127,11 +142,11 @@ npm install
 npm run dev
 ```
 
-Open <http://localhost:3000>. Pick your model from the header dropdown and start talking to your notes.
+Open <http://localhost:3000>. The app redirects unauthenticated visits to `/login`; hit `/register` to create a user, then start talking to your notes. See [`docs/05-authentication.md`](docs/05-authentication.md) for the full auth surface (`/auth/register`, `/auth/login`, `/auth/me`) and the data-isolation guarantees.
 
 ## Evaluation Harness
 
-With the backend running (Docker or local), execute the 14 scripted scenarios from `backend/eval/test_cases.py`:
+With the backend running (Docker or local), execute the 15 scripted scenarios from `backend/eval/test_cases.py`:
 
 ```bash
 source venv/bin/activate
@@ -139,7 +154,18 @@ python -m backend.eval.test_cases                # all scenarios
 python -m backend.eval.test_cases --only 07 14   # subset by name prefix
 ```
 
-Each scenario clears the `notes` table, optionally seeds rows (with backdated `created_at` where needed), replays a short conversation against the live agent, and asserts the tool sequence + final status + any DB conditions. One plan scenario (#12, contradiction probe) stays skipped — its assertion is subjective. After each run the harness writes a markdown summary to `backend/eval/report.md`.
+The harness registers (or logs in if the user already exists) `eval-user` at module import, stores the bearer token, and attaches it to every `/chat/stream` call. `16_user_isolation` additionally seeds a note owned by a second user (`eval-bob`) and asserts the primary user's `list_notes` / `search_notes` never surface bob's content — that scenario is the regression test for the per-user isolation guarantee.
+
+Each scenario clears only the **primary user's** notes (so bob's seeds survive for the isolation test), optionally seeds rows (with backdated `created_at` where needed), replays a short conversation against the live agent, and asserts the tool sequence + final status + any DB conditions. One plan scenario (#12, contradiction probe) stays skipped — its assertion is subjective. After each run the harness writes a markdown summary to `backend/eval/report.md`. The reasoning for doing this end-to-end against a real LLM (rather than mocking) is in [`docs/DESIGN.md § Evaluation`](docs/DESIGN.md#evaluation--end-to-end-real-llm).
+
+### Unit tests
+
+There are also ~190 unit tests covering the service layer, tool dispatcher, orchestrator, session store, and the auth layer (passwords, tokens, service, routes). These don't need a live LLM or Ollama.
+
+```bash
+source venv/bin/activate
+pytest backend/tests -q
+```
 
 ## Documentation
 
@@ -148,6 +174,7 @@ Each scenario clears the `notes` table, optionally seeds rows (with backdated `c
 - [`docs/02-data-models.md`](docs/02-data-models.md) — Pydantic models, provider mappers, SQLite schema.
 - [`docs/03-note-agent.md`](docs/03-note-agent.md) — tools, confirmation gates, orchestrator flows.
 - [`docs/04-memory-and-state.md`](docs/04-memory-and-state.md) — session store, context line, reducer state.
+- [`docs/05-authentication.md`](docs/05-authentication.md) — multi-user mode, JWT + bcrypt, `user_id` threading, frontend auth.
 - [`docs/TOOLS.md`](docs/TOOLS.md) — per-tool reference (args, returns, error codes, examples).
-- [`backend/eval/report.md`](backend/eval/report.md) — latest pass/fail run (14/14 scenarios).
+- [`backend/eval/report.md`](backend/eval/report.md) — latest pass/fail run.
 - [`docs/files/`](docs/files/) — file-by-file walkthroughs (local reference; gitignored).

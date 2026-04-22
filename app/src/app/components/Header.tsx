@@ -4,6 +4,7 @@ import { RotateCcw } from "lucide-react";
 import { shortSessionId } from "../lib/session";
 import type { ModelId } from "../types";
 import ModelSelector from "./ModelSelector";
+import UserBadge from "./UserBadge";
 
 interface Props {
   sessionId: string;
@@ -31,6 +32,7 @@ export default function Header({
           disabled={isStreaming}
           onChange={onModelChange}
         />
+        <UserBadge />
         {sessionId && (
           <span className="font-mono">
             session · {shortSessionId(sessionId)}

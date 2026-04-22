@@ -1,6 +1,6 @@
 # Design Notes
 
-A one-pager summary of the design decisions behind this project and why each was chosen. For the full deep dive see [`01-architecture.md`](01-architecture.md), [`02-data-models.md`](02-data-models.md), [`03-note-agent.md`](03-note-agent.md), and [`04-memory-and-state.md`](04-memory-and-state.md); this doc is the distillation.
+A one-pager summary of the design decisions behind this project and why each was chosen. For the full deep dive see [`01-architecture.md`](01-architecture.md), [`02-data-models.md`](02-data-models.md), [`03-note-agent.md`](03-note-agent.md), [`04-memory-and-state.md`](04-memory-and-state.md), and [`05-authentication.md`](05-authentication.md); this doc is the distillation.
 
 ## The Problem
 
@@ -101,21 +101,42 @@ One `notes` table, two indexes, no FTS5. Embeddings live in-row as packed `float
 
 ## Evaluation — End-to-End, Real LLM
 
-14 scenarios (adapted from the plan's 15; #12 contradiction probe skipped because its assertion is subjective). Harness speaks HTTP to the real backend, consumes the SSE stream, captures tool-call / tool-result pairs, asserts per-turn expectations.
+15 scenarios (14 note-agent + 1 cross-user isolation; plan's #12 contradiction probe skipped because its assertion is subjective). Harness registers / logs in the primary eval user at module import, attaches its bearer token to every request, speaks HTTP to the real backend, consumes the SSE stream, captures tool-call / tool-result pairs, and asserts per-turn expectations.
 
 **Why real LLM rather than mocks**: an agent tested against a scripted LLM proves the plumbing works but not the prompt. The point of the harness is to catch prompt regressions, and that only fires against a real model.
 
-**Why E2E over unit tests**: multi-turn behaviour (pronoun resolution, merge-with-pending, confirmation flow) is inherently stateful. Testing each layer in isolation with mocks would miss the most interesting bugs. Latest report (real Gemini 2.5 Flash): **14/14 pass**. See [`backend/eval/report.md`](../backend/eval/report.md).
+**Why E2E over unit tests**: multi-turn behaviour (pronoun resolution, merge-with-pending, confirmation flow) is inherently stateful. Testing each layer in isolation with mocks would miss the most interesting bugs. Scenario `16_user_isolation` extends this to cross-user blindness: register a second user, seed a note for them, and assert the primary user's agent never surfaces it. See [`backend/eval/report.md`](../backend/eval/report.md).
+
+Unit tests fill in the parts E2E can't: ~190 tests covering the service/tool/orchestrator layers and the full auth surface (passwords, tokens, service, routes) — these run offline with no LLM and are the first line of defence for the per-user scoping invariant.
+
+## Authentication & Multi-User — Bonus
+
+Auth landed as a bonus because the plan's §13 trade-off table called it out explicitly. Every decision below is in service of a single invariant: no user can see or modify another user's notes.
+
+**Why usernames, not emails** — zero SMTP dependency, defer verification to v2. Username is the identity string; email can become a profile field later without changing auth.
+
+**Why JWT (HS256) over server-side sessions** — a single-server app doesn't need the machinery of a session store. HS256 is the simplest option that still gives expiry + tamper detection. `AUTH_SECRET` has no default; the app refuses to boot without one, and `docker-compose.yml` enforces the same rule via `${AUTH_SECRET:?...}`.
+
+**Why `user_id` keyword-only** — every note-touching function takes `user_id` as a keyword-only argument (service, tools.execute, handle_user_message). That forces explicit call sites and survives signature changes. The grep-rule invariant — "every `FROM notes` / `UPDATE notes` / `DELETE FROM notes` has `AND user_id = ?`" — holds across the whole service.
+
+**Why a compound SessionStore key** — `(user_id, session_id)` as a flat string key, not a nested dict. Two users using the same client-generated session_id get distinct state. `reset_user(user_id)` is a one-line sweep.
+
+**Why a tiny hand-rolled migration runner** — one file, `backend/db/migrations.py`, version table + list of `(n, sql)` tuples. Pulling in Alembic for a single schema change would be disproportionate.
+
+**Why localStorage for the token (v1)** — honest trade-off captured in [`05-authentication.md`](05-authentication.md#token-storage--localstorage). The app has no user-generated HTML render path, so XSS surface is small. v2 target is httpOnly cookies + CSRF.
+
+**Why tools stay unchanged** — the tool schemas, `TOOL_DEFS`, and `ToolResult` envelope are identical to pre-auth. Scoping is enforced server-side in the dispatcher; `user_id` is never in the LLM-facing contract. The agent can't accidentally (or maliciously) cross tenants by picking a different id.
 
 ## Trade-offs / What Wasn't Built
 
 | Decision | Why skipped |
 |---|---|
-| No ORM / migrations framework | Single table, zero churn; raw SQL stays readable. |
-| No auth / multi-user | Single-user assessment. Adding `user_id` would touch every query; plan §13 has the design. |
+| No ORM | Raw SQL stays readable; the migration runner covers the one schema change cleanly. |
 | No MCP server | Not built. The tool layer is decoupled enough that a wrap-and-republish would be small. Plan §14. |
-| In-memory session state | No Redis dependency; session survives process lifetime only. `SessionStore` interface is ready for a Redis swap. |
-| No unit tests | Harness is end-to-end against a real model. Unit tests would have been low-leverage vs. the integration surface. |
+| In-memory session state | No Redis dependency; session survives process lifetime only. `SessionStore` interface (now compound-keyed) is ready for a Redis swap. |
+| Token in localStorage | v1 trade-off; v2 target is httpOnly cookie once CSRF is handled. |
+| No token revocation / blocklist | v1 relies on the 7-day expiry. A server-side blocklist is the obvious v2 add. |
+| No rate limiting / email verification / RBAC | Out of v1 scope per `05-authentication.md §Out of Scope`. |
 
 ## File Map
 
@@ -123,28 +144,37 @@ See [`01-architecture.md`](01-architecture.md) for the full layer diagram. Headl
 
 ```
 backend/
-├── main.py              ← HTTP + SSE bridge
-├── config.py            ← frozen Settings dataclass
+├── main.py              ← HTTP + SSE bridge, current_user gate on /chat*
+├── config.py            ← frozen Settings dataclass (incl. AUTH_* fields)
 ├── agent/
-│   ├── intent_parser.py ← orchestrator + gates + loop
-│   ├── conversation_state.py ← SessionStore + (context) line
+│   ├── intent_parser.py ← orchestrator + gates + loop (takes user_id)
+│   ├── conversation_state.py ← SessionStore (compound key) + (context) line
 │   ├── prompts.py       ← SYSTEM_PROMPT
 │   ├── llm_handler.py   ← provider dispatcher
 │   ├── llm_ollama.py    ← Ollama provider
 │   ├── llm_gemini.py    ← Gemini provider (message + schema translation)
 │   └── llm_types.py     ← LLMResponse, ToolCall
+├── auth/
+│   ├── models.py        ← UserPublic, RegisterIn, LoginIn, TokenOut
+│   ├── passwords.py     ← bcrypt wrappers
+│   ├── tokens.py        ← HS256 JWT sign/verify (no default secret)
+│   ├── service.py       ← create_user, authenticate, get_by_id
+│   ├── dependencies.py  ← current_user FastAPI dep
+│   └── routes.py        ← /auth/register, /auth/login, /auth/me
 ├── tools/
 │   ├── schemas.py       ← Pydantic arg models, ToolResult, TOOL_DEFS
-│   └── note_tools.py    ← dispatcher (execute) — never raises
+│   └── note_tools.py    ← dispatcher (execute) — never raises, takes user_id
 ├── services/
-│   ├── note_service.py  ← CRUD, search, tag+date list, backfill
+│   ├── note_service.py  ← CRUD, search, tag+date list, backfill (user-scoped)
 │   ├── embeddings.py    ← nomic-embed-text wrapper
 │   └── models.py        ← Note, NoteSummary, TagCount
 ├── db/
-│   └── sqlite.py        ← schema, init_db, tx() context manager
-└── eval/
-    ├── test_cases.py    ← 14-scenario SSE-based harness
-    └── report.md        ← latest results
+│   ├── sqlite.py        ← tx() context manager, init_db wrapper
+│   └── migrations.py    ← versioned runner (v1 schema, v2 auth)
+├── eval/
+│   ├── test_cases.py    ← 15-scenario SSE-based harness (incl. isolation)
+│   └── report.md        ← latest results
+└── tests/               ← ~190 unit tests (gitignored)
 ```
 
 ## One-Line Defensibility Test

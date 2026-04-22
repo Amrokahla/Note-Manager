@@ -5,6 +5,7 @@ import json
 import sqlite3
 import sys
 import time
+import urllib.error
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
@@ -17,6 +18,11 @@ from backend.config import settings
 BACKEND = "http://localhost:8000"
 MODEL = "gemini-2.5-flash"
 REPORT_PATH = Path(__file__).parent / "report.md"
+
+PRIMARY_USER = "eval-user"
+PRIMARY_PASSWORD = "eval-pass-please-change"
+SECONDARY_USER = "eval-bob"
+SECONDARY_PASSWORD = "eval-bob-pass-please-change"
 
 
 @dataclass
@@ -33,6 +39,41 @@ class TurnResult:
     tool_calls: list[CapturedCall] = field(default_factory=list)
 
 
+def _post_json(path: str, body: dict, token: str | None = None) -> dict:
+    """POST JSON to the backend and return the parsed response. Raises
+    urllib.error.HTTPError on non-2xx."""
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if token is not None:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(
+        f"{BACKEND}{path}",
+        data=json.dumps(body).encode(),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _register_and_login(username: str, password: str) -> tuple[int, str]:
+    """Idempotent — register if new, then login. Returns (user_id, bearer_token)."""
+    try:
+        _post_json(
+            "/auth/register", {"username": username, "password": password}
+        )
+    except urllib.error.HTTPError as e:
+        if e.code != 409:  # 409 == already registered; anything else is fatal
+            raise
+    body = _post_json(
+        "/auth/login", {"username": username, "password": password}
+    )
+    return int(body["user"]["id"]), body["access_token"]
+
+
+# Set once at module import so scenarios don't each pay the login cost.
+PRIMARY_USER_ID, TOKEN = _register_and_login(PRIMARY_USER, PRIMARY_PASSWORD)
+
+
 def _post_stream(session_id: str, message: str) -> TurnResult:
     """POST to /chat/stream and parse SSE frames into a TurnResult."""
     body = json.dumps(
@@ -44,6 +85,7 @@ def _post_stream(session_id: str, message: str) -> TurnResult:
         headers={
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
+            "Authorization": f"Bearer {TOKEN}",
         },
         method="POST",
     )
@@ -96,30 +138,34 @@ def _parse_frame(frame: str) -> tuple[str | None, dict]:
         return event, {}
 
 
-def _clear_db() -> None:
-    """Wipe the notes table between scenarios so each run is isolated."""
+def _clear_user_notes(user_id: int) -> None:
+    """Wipe only the given user's notes between scenarios. Other users' rows
+    must survive so isolation tests can assert cross-user blindness."""
     conn = sqlite3.connect(settings.db_path)
     try:
-        conn.execute("DELETE FROM notes")
+        conn.execute("DELETE FROM notes WHERE user_id = ?", (user_id,))
         conn.commit()
     finally:
         conn.close()
 
 
-def _count_notes() -> int:
+def _count_user_notes(user_id: int) -> int:
     conn = sqlite3.connect(settings.db_path)
     try:
-        return conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+        return conn.execute(
+            "SELECT COUNT(*) FROM notes WHERE user_id = ?", (user_id,)
+        ).fetchone()[0]
     finally:
         conn.close()
 
 
-def _note_exists_with(title_substr: str) -> bool:
+def _note_exists_with(title_substr: str, *, user_id: int = PRIMARY_USER_ID) -> bool:
     conn = sqlite3.connect(settings.db_path)
     try:
         row = conn.execute(
-            "SELECT 1 FROM notes WHERE lower(title) LIKE ? LIMIT 1",
-            (f"%{title_substr.lower()}%",),
+            "SELECT 1 FROM notes "
+            "WHERE lower(title) LIKE ? AND user_id = ? LIMIT 1",
+            (f"%{title_substr.lower()}%", user_id),
         ).fetchone()
         return row is not None
     finally:
@@ -127,14 +173,20 @@ def _note_exists_with(title_substr: str) -> bool:
 
 
 def _seed(title: str, description: str, tag: str | None = None) -> None:
-    """Seed a note directly (bypassing the agent) to set up scenarios."""
+    """Seed a note directly for the primary eval user (bypasses the agent)."""
     from backend.services.note_service import create_note
-    create_note(title, description, tag)
+    create_note(title, description, tag, user_id=PRIMARY_USER_ID)
+
+
+def _seed_for_other_user(title: str, description: str, tag: str | None = None) -> None:
+    """Ensure the secondary user exists, then seed a note owned by them."""
+    from backend.services.note_service import create_note
+    bob_id, _ = _register_and_login(SECONDARY_USER, SECONDARY_PASSWORD)
+    create_note(title, description, tag, user_id=bob_id)
 
 
 def _backdate_note(title_substr: str, days_ago: int) -> None:
-    """Push the latest note matching `title_substr` back by N days. Used to build
-    date-range scenarios where we need a deterministic temporal spread."""
+    """Push the primary user's latest matching note back by N days."""
     from datetime import datetime, timedelta, timezone
 
     past = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
@@ -142,8 +194,8 @@ def _backdate_note(title_substr: str, days_ago: int) -> None:
     try:
         conn.execute(
             "UPDATE notes SET created_at = ?, updated_at = ? "
-            "WHERE lower(title) LIKE ?",
-            (past, past, f"%{title_substr.lower()}%"),
+            "WHERE lower(title) LIKE ? AND user_id = ?",
+            (past, past, f"%{title_substr.lower()}%", PRIMARY_USER_ID),
         )
         conn.commit()
     finally:
@@ -338,6 +390,26 @@ SCENARIOS: list[Scenario] = [
             ),
         ],
     ),
+    Scenario(
+        name="16_user_isolation",
+        tags=["E", "auth"],
+        # Bob owns a secret note that eval-user must never see.
+        post_seed=lambda: _seed_for_other_user(
+            "bob's super secret note", "bob's private investigation notes", "bob"
+        ),
+        turns=[
+            Turn(
+                user="list all my notes",
+                expect_tool="list_notes",
+                expect_reply_excludes="bob's super secret",
+            ),
+            Turn(
+                user="find the note about bob's private investigation",
+                expect_tool="search_notes",
+                expect_reply_excludes="bob's private investigation",
+            ),
+        ],
+    ),
 ]
 
 SKIPPED: list[tuple[str, str]] = [
@@ -350,7 +422,8 @@ def _tag_normalized_exists(tag: str) -> bool:
     conn = sqlite3.connect(settings.db_path)
     try:
         row = conn.execute(
-            "SELECT 1 FROM notes WHERE tag = ? LIMIT 1", (tag,)
+            "SELECT 1 FROM notes WHERE tag = ? AND user_id = ? LIMIT 1",
+            (tag, PRIMARY_USER_ID),
         ).fetchone()
         return row is not None
     finally:
@@ -400,7 +473,9 @@ def _assert_turn(turn: Turn, r: TurnResult) -> tuple[bool, str]:
 
 
 def run_scenario(sc: Scenario) -> dict[str, Any]:
-    _clear_db()
+    # Clear only the primary user's notes — secondary user's seeds must
+    # survive across scenarios for isolation tests to keep biting.
+    _clear_user_notes(PRIMARY_USER_ID)
     for t, d, tag in sc.seeds:
         _seed(t, d, tag)
     if sc.post_seed is not None:

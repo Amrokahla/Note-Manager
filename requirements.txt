@@ -5,3 +5,5 @@ ollama
 google-genai
 python-dotenv
 numpy
+bcrypt>=4.1
+pyjwt>=2.8

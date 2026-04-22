@@ -19,6 +19,9 @@ class Settings:
     search_threshold: float = float(os.getenv("SEARCH_THRESHOLD", "0.35"))
     search_fallback_limit: int = int(os.getenv("SEARCH_FALLBACK_LIMIT", "3"))
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY") or None
+    auth_secret: str | None = os.getenv("AUTH_SECRET") or None
+    auth_token_ttl_minutes: int = int(os.getenv("AUTH_TOKEN_TTL_MINUTES", "10080"))
+    auth_bcrypt_cost: int = int(os.getenv("AUTH_BCRYPT_COST", "12"))
 
 
 settings = Settings()

@@ -59,7 +59,13 @@ def _try_embed(title: str, description: str) -> tuple[bytes | None, str | None]:
         return None, None
 
 
-def create_note(title: str, description: str, tag: str | None = None) -> Note:
+def create_note(
+    title: str,
+    description: str,
+    tag: str | None = None,
+    *,
+    user_id: int,
+) -> Note:
     now = _utc_now_iso()
     norm_tag = normalize_tag(tag)
     embedding_blob, embedding_ts = _try_embed(title, description)
@@ -68,26 +74,35 @@ def create_note(title: str, description: str, tag: str | None = None) -> Note:
         cur = conn.execute(
             """
             INSERT INTO notes(title, description, tag, embedding, embedding_updated_at,
-                              created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                              created_at, updated_at, user_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (title, description, norm_tag, embedding_blob, embedding_ts, now, now),
+            (
+                title,
+                description,
+                norm_tag,
+                embedding_blob,
+                embedding_ts,
+                now,
+                now,
+                user_id,
+            ),
         )
         note_id = int(cur.lastrowid)
         row = conn.execute(
             "SELECT id, title, description, tag, created_at, updated_at "
-            "FROM notes WHERE id = ?",
-            (note_id,),
+            "FROM notes WHERE id = ? AND user_id = ?",
+            (note_id, user_id),
         ).fetchone()
     return _row_to_note(row)
 
 
-def get_note(note_id: int) -> Note | None:
+def get_note(note_id: int, *, user_id: int) -> Note | None:
     with tx() as conn:
         row = conn.execute(
             "SELECT id, title, description, tag, created_at, updated_at "
-            "FROM notes WHERE id = ?",
-            (note_id,),
+            "FROM notes WHERE id = ? AND user_id = ?",
+            (note_id, user_id),
         ).fetchone()
     return _row_to_note(row) if row else None
 
@@ -99,11 +114,13 @@ def update_note(
     tag: str | None = None,
     *,
     clear_tag: bool = False,
+    user_id: int,
 ) -> Note | None:
     """Patch an existing note; `clear_tag=True` sets tag to NULL explicitly."""
     with tx() as conn:
         existing = conn.execute(
-            "SELECT title, description FROM notes WHERE id = ?", (note_id,)
+            "SELECT title, description FROM notes WHERE id = ? AND user_id = ?",
+            (note_id, user_id),
         ).fetchone()
         if existing is None:
             return None
@@ -135,29 +152,33 @@ def update_note(
         if not set_clauses:
             row = conn.execute(
                 "SELECT id, title, description, tag, created_at, updated_at "
-                "FROM notes WHERE id = ?",
-                (note_id,),
+                "FROM notes WHERE id = ? AND user_id = ?",
+                (note_id, user_id),
             ).fetchone()
             return _row_to_note(row)
 
         set_clauses.append("updated_at = ?")
         args.append(_utc_now_iso())
         args.append(note_id)
+        args.append(user_id)
         conn.execute(
-            f"UPDATE notes SET {', '.join(set_clauses)} WHERE id = ?",
+            f"UPDATE notes SET {', '.join(set_clauses)} WHERE id = ? AND user_id = ?",
             args,
         )
         row = conn.execute(
             "SELECT id, title, description, tag, created_at, updated_at "
-            "FROM notes WHERE id = ?",
-            (note_id,),
+            "FROM notes WHERE id = ? AND user_id = ?",
+            (note_id, user_id),
         ).fetchone()
     return _row_to_note(row)
 
 
-def delete_note(note_id: int) -> bool:
+def delete_note(note_id: int, *, user_id: int) -> bool:
     with tx() as conn:
-        cur = conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+        cur = conn.execute(
+            "DELETE FROM notes WHERE id = ? AND user_id = ?",
+            (note_id, user_id),
+        )
         return cur.rowcount > 0
 
 
@@ -166,10 +187,12 @@ def list_notes(
     limit: int = 10,
     date_from: datetime | None = None,
     date_to: datetime | None = None,
+    *,
+    user_id: int,
 ) -> list[NoteSummary]:
     norm_tag = normalize_tag(tag) if tag else None
-    where_parts: list[str] = []
-    args: list = []
+    where_parts: list[str] = ["user_id = ?"]
+    args: list = [user_id]
     if norm_tag is not None:
         where_parts.append("tag = ?")
         args.append(norm_tag)
@@ -180,7 +203,7 @@ def list_notes(
         where_parts.append("created_at <= ?")
         args.append(date_to.isoformat())
 
-    where_sql = f"WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    where_sql = f"WHERE {' AND '.join(where_parts)}"
     sql = (
         "SELECT id, title, description, tag, updated_at "
         f"FROM notes {where_sql} "
@@ -192,19 +215,19 @@ def list_notes(
     return [_row_to_summary(r) for r in rows]
 
 
-def list_tags(limit: int = 4) -> list[TagCount]:
-    """Return the top-N tags by usage count."""
+def list_tags(limit: int = 4, *, user_id: int) -> list[TagCount]:
+    """Return the top-N tags by usage count for one user."""
     with tx() as conn:
         rows = conn.execute(
             """
             SELECT tag, COUNT(*) AS c
             FROM notes
-            WHERE tag IS NOT NULL
+            WHERE tag IS NOT NULL AND user_id = ?
             GROUP BY tag
             ORDER BY c DESC, tag ASC
             LIMIT ?
             """,
-            (limit,),
+            (user_id, limit),
         ).fetchall()
     return [TagCount(tag=r["tag"], count=r["c"]) for r in rows]
 
@@ -214,8 +237,10 @@ def search_semantic(
     limit: int = 5,
     threshold: float | None = None,
     fallback_limit: int | None = None,
+    *,
+    user_id: int,
 ) -> tuple[list[NoteSummary], bool]:
-    """Rank notes by cosine similarity; returns (results, above_threshold)."""
+    """Rank one user's notes by cosine similarity; returns (results, above_threshold)."""
     if threshold is None:
         threshold = settings.search_threshold
     if fallback_limit is None:
@@ -227,8 +252,9 @@ def search_semantic(
         rows = conn.execute(
             """
             SELECT id, title, description, tag, embedding, updated_at
-            FROM notes WHERE embedding IS NOT NULL
-            """
+            FROM notes WHERE embedding IS NOT NULL AND user_id = ?
+            """,
+            (user_id,),
         ).fetchall()
 
     if not rows:
@@ -249,7 +275,8 @@ def search_semantic(
 
 
 def backfill_embeddings() -> int:
-    """Embed every note that doesn't yet have an embedding; idempotent."""
+    """Embed every note that doesn't yet have an embedding; idempotent and
+    global (runs at startup before any request carries a user_id)."""
     with tx() as conn:
         rows = conn.execute(
             "SELECT id, title, description FROM notes WHERE embedding IS NULL"

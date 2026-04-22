@@ -7,7 +7,7 @@ import threading
 from contextlib import asynccontextmanager
 from typing import Any, Iterator
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from ollama import Client
@@ -15,8 +15,11 @@ from pydantic import BaseModel, Field
 
 from backend.agent import intent_parser
 from backend.agent.llm_handler import DEFAULT_MODEL, MODEL_OPTIONS
+from backend.auth.dependencies import current_user
+from backend.auth.models import UserPublic
+from backend.auth.routes import router as auth_router
 from backend.config import settings
-from backend.db.sqlite import init_db
+from backend.db.migrations import run_migrations
 from backend.services import note_service
 
 logger = logging.getLogger(__name__)
@@ -26,7 +29,13 @@ ollama = Client(host=settings.ollama_host)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    if not settings.auth_secret:
+        raise RuntimeError(
+            "AUTH_SECRET is not set. Refusing to start — a silent default "
+            "would sign every JWT with a known secret. Set AUTH_SECRET in "
+            "your .env (see .env.example)."
+        )
+    run_migrations()
     try:
         note_service.backfill_embeddings()
     except Exception as e:
@@ -47,6 +56,8 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router)
 
 
 def _model_is_available(list_response: Any, target: str) -> bool:
@@ -105,7 +116,7 @@ def _resolved_model(requested: str) -> str:
 
 
 @app.get("/models")
-def models():
+def models(user: UserPublic = Depends(current_user)):
     """Allowed model ids so the UI can render a selector."""
     return {
         "default": DEFAULT_MODEL,
@@ -114,9 +125,14 @@ def models():
 
 
 @app.post("/chat", response_model=ChatOut)
-def chat(body: ChatIn) -> ChatOut:
+def chat(
+    body: ChatIn, user: UserPublic = Depends(current_user)
+) -> ChatOut:
     turn = intent_parser.handle_user_message(
-        body.session_id, body.message, model=_resolved_model(body.model)
+        body.session_id,
+        body.message,
+        model=_resolved_model(body.model),
+        user_id=user.id,
     )
     return ChatOut(
         session_id=body.session_id,
@@ -137,7 +153,9 @@ def _format_sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
-def _sse_stream(session_id: str, message: str, model: str) -> Iterator[str]:
+def _sse_stream(
+    session_id: str, message: str, model: str, user_id: int
+) -> Iterator[str]:
     q: queue.Queue[tuple[str, dict] | object] = queue.Queue()
     sentinel = object()
 
@@ -147,7 +165,11 @@ def _sse_stream(session_id: str, message: str, model: str) -> Iterator[str]:
     def run_orchestrator() -> None:
         try:
             intent_parser.handle_user_message(
-                session_id, message, emit=emit, model=model
+                session_id,
+                message,
+                emit=emit,
+                model=model,
+                user_id=user_id,
             )
         except Exception as e:
             logger.exception("Orchestrator crashed while streaming")
@@ -166,9 +188,16 @@ def _sse_stream(session_id: str, message: str, model: str) -> Iterator[str]:
 
 
 @app.post("/chat/stream")
-def chat_stream(body: ChatIn) -> StreamingResponse:
+def chat_stream(
+    body: ChatIn, user: UserPublic = Depends(current_user)
+) -> StreamingResponse:
     return StreamingResponse(
-        _sse_stream(body.session_id, body.message, _resolved_model(body.model)),
+        _sse_stream(
+            body.session_id,
+            body.message,
+            _resolved_model(body.model),
+            user.id,
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -14,6 +14,7 @@ _MAX_MESSAGES = settings.history_turns * 2
 @dataclass
 class SessionState:
     session_id: str
+    user_id: int | None = None
     messages: deque[dict] = field(
         default_factory=lambda: deque(maxlen=_MAX_MESSAGES)
     )
@@ -21,21 +22,35 @@ class SessionState:
     pending_confirmation: dict | None = None
 
 
+def _compound_key(user_id: int | None, session_id: str) -> str:
+    """Flat compound key so two users with the same session_id don't collide."""
+    # `None` is only used by pre-auth call sites (tests, CLI harness).
+    return f"{user_id if user_id is not None else '-'}:{session_id}"
+
+
 class SessionStore:
-    """In-memory per-session state; swap to Redis by reimplementing `get`/`reset`."""
+    """In-memory per-user, per-session state."""
 
     def __init__(self) -> None:
         self._sessions: dict[str, SessionState] = {}
 
-    def get(self, session_id: str) -> SessionState:
-        existing = self._sessions.get(session_id)
+    def get(
+        self, session_id: str, *, user_id: int | None = None
+    ) -> SessionState:
+        key = _compound_key(user_id, session_id)
+        existing = self._sessions.get(key)
         if existing is None:
-            existing = SessionState(session_id=session_id)
-            self._sessions[session_id] = existing
+            existing = SessionState(session_id=session_id, user_id=user_id)
+            self._sessions[key] = existing
         return existing
 
-    def reset(self, session_id: str) -> None:
-        self._sessions.pop(session_id, None)
+    def reset(self, session_id: str, *, user_id: int | None = None) -> None:
+        self._sessions.pop(_compound_key(user_id, session_id), None)
+
+    def reset_user(self, user_id: int) -> None:
+        prefix = f"{user_id}:"
+        for k in [k for k in self._sessions if k.startswith(prefix)]:
+            self._sessions.pop(k, None)
 
     def clear(self) -> None:
         self._sessions.clear()

@@ -12,8 +12,7 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-# Each migration is a single `executescript` body. Add a new tuple at the end
-# of the list to introduce a change — never edit or reorder existing entries.
+# Append-only: never edit or reorder existing entries — schema_version tracks them by index.
 MIGRATIONS: list[tuple[int, str]] = [
     (
         1,

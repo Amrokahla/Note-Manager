@@ -13,7 +13,7 @@ from backend.agent.conversation_state import (
     build_context_line,
     remember_referenced,
 )
-from backend.agent.llm_handler import ToolCall
+from backend.agent.llm_handler import LLMResponse, ToolCall
 from backend.agent.prompts import SYSTEM_PROMPT
 from backend.config import settings
 from backend.tools import note_tools
@@ -147,6 +147,42 @@ _FALLBACK_REPLY = (
     "I'm having trouble completing that — could you rephrase or break it into "
     "smaller steps?"
 )
+
+
+def _chat_with_fallback(
+    *,
+    messages: list[dict],
+    tools_for_turn: list[dict] | None,
+    model: str,
+    emit: EmitFunc,
+    session_id: str,
+) -> LLMResponse:
+    """One streaming attempt; non-streaming retry on exception or empty content."""
+    def _forward_delta(delta: str) -> None:
+        emit("assistant_delta", {"content": delta})
+
+    try:
+        resp = llm_handler.chat(
+            messages, tools=tools_for_turn, on_delta=_forward_delta, model=model
+        )
+    except Exception as e:
+        logger.warning(
+            "Provider error from model=%s session=%s (%s) — retrying once",
+            model, session_id, e,
+        )
+        resp = llm_handler.chat(
+            messages, tools=tools_for_turn, on_delta=None, model=model
+        )
+
+    if resp.kind == "message" and not (resp.content or "").strip():
+        logger.warning(
+            "Empty response from model=%s session=%s — retrying once",
+            model, session_id,
+        )
+        resp = llm_handler.chat(
+            messages, tools=tools_for_turn, on_delta=None, model=model
+        )
+    return resp
 
 
 def _build_messages(state: SessionState) -> list[dict]:
@@ -291,43 +327,13 @@ def handle_user_message(
 
     for _ in range(settings.max_tool_hops):
         messages = _build_messages(state)
-
-        def _forward_delta(delta: str) -> None:
-            _emit("assistant_delta", {"content": delta})
-
-        try:
-            resp = llm_handler.chat(
-                messages,
-                tools=tools_for_turn,
-                on_delta=_forward_delta,
-                model=model,
-            )
-        except Exception as e:
-            logger.warning(
-                "Provider error from model=%s session=%s (%s) — retrying once",
-                model,
-                session_id,
-                e,
-            )
-            resp = llm_handler.chat(
-                messages,
-                tools=tools_for_turn,
-                on_delta=None,
-                model=model,
-            )
-
-        if resp.kind == "message" and not (resp.content or "").strip():
-            logger.warning(
-                "Empty response from model=%s session=%s — retrying once",
-                model,
-                session_id,
-            )
-            resp = llm_handler.chat(
-                messages,
-                tools=tools_for_turn,
-                on_delta=None,
-                model=model,
-            )
+        resp = _chat_with_fallback(
+            messages=messages,
+            tools_for_turn=tools_for_turn,
+            model=model,
+            emit=_emit,
+            session_id=session_id,
+        )
 
         if resp.kind == "message":
             reply = (resp.content or "").strip()
@@ -384,8 +390,6 @@ def handle_user_message(
 
 
 if __name__ == "__main__":  # pragma: no cover
-    import uuid
-
     from backend.auth.service import create_user
     from backend.auth.models import UsernameTakenError
     from backend.db.migrations import run_migrations

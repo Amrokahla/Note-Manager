@@ -1,25 +1,9 @@
 from __future__ import annotations
 
-import json
 from datetime import datetime
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, Field
-
-
-def _coerce_json_list(v: Any) -> Any:
-    """Parse a JSON-encoded string into a list; small models sometimes stringify list args."""
-    if isinstance(v, str):
-        try:
-            parsed = json.loads(v)
-        except json.JSONDecodeError:
-            return v
-        if isinstance(parsed, list):
-            return parsed
-    return v
-
-
-StrList = Annotated[list[str], BeforeValidator(_coerce_json_list)]
+from pydantic import BaseModel, Field
 
 
 class AddNoteArgs(BaseModel):

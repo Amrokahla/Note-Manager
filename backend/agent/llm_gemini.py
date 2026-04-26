@@ -316,18 +316,23 @@ def _safety_block_none() -> list[genai_types.SafetySetting]:
     ]
 
 
+def _coerce_function_call_args(fc: Any) -> dict:
+    """Convert google-genai's FunctionCall.args to a plain dict; never raises."""
+    args = getattr(fc, "args", None) or {}
+    if isinstance(args, dict):
+        return args
+    try:
+        return dict(args)
+    except Exception:
+        return {}
+
+
 def _extract_tool_calls_from_parts(parts: list) -> list[ToolCall]:
     out: list[ToolCall] = []
     for part in parts or []:
         fc = getattr(part, "function_call", None)
         if fc and getattr(fc, "name", None):
-            args = getattr(fc, "args", None) or {}
-            if not isinstance(args, dict):
-                try:
-                    args = dict(args)
-                except Exception:
-                    args = {}
-            out.append(ToolCall(name=fc.name, arguments=args))
+            out.append(ToolCall(name=fc.name, arguments=_coerce_function_call_args(fc)))
     return out
 
 
@@ -465,14 +470,8 @@ def _chat_streaming(
                     on_delta(text)
                 fc = getattr(part, "function_call", None)
                 if fc and getattr(fc, "name", None):
-                    args = getattr(fc, "args", None) or {}
-                    if not isinstance(args, dict):
-                        try:
-                            args = dict(args)
-                        except Exception:
-                            args = {}
                     collected_tool_calls.append(
-                        ToolCall(name=fc.name, arguments=args)
+                        ToolCall(name=fc.name, arguments=_coerce_function_call_args(fc))
                     )
 
     _log_usage(model, last_usage)

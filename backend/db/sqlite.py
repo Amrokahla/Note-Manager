@@ -30,8 +30,7 @@ def tx() -> Iterator[sqlite3.Connection]:
 
 
 def init_db() -> None:
-    """Bring the DB up to the latest schema version. Thin wrapper for callers
-    (tests, CLI scripts) that predate the migration runner."""
+    """Bring the DB to the latest schema (legacy wrapper for tests/CLI predating the migration runner)."""
     # Local import avoids an import cycle: migrations imports `tx` from here.
     from backend.db.migrations import run_migrations
 

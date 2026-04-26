@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timezone
 
-from backend.auth.models import UserInDB, UserPublic, UsernameTakenError
+from backend.auth.models import UserPublic, UsernameTakenError
 from backend.auth.passwords import hash_password, verify_password
 from backend.db.sqlite import tx
 
@@ -16,15 +16,6 @@ def _row_to_public(row: sqlite3.Row) -> UserPublic:
     return UserPublic(
         id=row["id"],
         username=row["username"],
-        created_at=row["created_at"],
-    )
-
-
-def _row_to_db(row: sqlite3.Row) -> UserInDB:
-    return UserInDB(
-        id=row["id"],
-        username=row["username"],
-        password_hash=row["password_hash"],
         created_at=row["created_at"],
     )
 
@@ -62,12 +53,9 @@ def authenticate(username: str, password: str) -> UserPublic | None:
         ).fetchone()
     if row is None:
         return None
-    user = _row_to_db(row)
-    if not verify_password(password, user.password_hash):
+    if not verify_password(password, row["password_hash"]):
         return None
-    return UserPublic(
-        id=user.id, username=user.username, created_at=user.created_at
-    )
+    return _row_to_public(row)
 
 
 def get_by_id(user_id: int) -> UserPublic | None:

@@ -14,10 +14,6 @@ class UserPublic(BaseModel):
     created_at: datetime
 
 
-class UserInDB(UserPublic):
-    password_hash: str
-
-
 class RegisterIn(BaseModel):
     # Username regex keeps it URL-safe and unambiguous for v1.
     username: str = Field(

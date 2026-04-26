@@ -45,6 +45,12 @@ def _row_to_summary(row: sqlite3.Row, similarity: float | None = None) -> NoteSu
     )
 
 
+_FETCH_NOTE_BY_ID = (
+    "SELECT id, title, description, tag, created_at, updated_at "
+    "FROM notes WHERE id = ? AND user_id = ?"
+)
+
+
 def _compose_embed_input(title: str, description: str) -> str:
     return f"{title}\n\n{description}"
 
@@ -89,21 +95,13 @@ def create_note(
             ),
         )
         note_id = int(cur.lastrowid)
-        row = conn.execute(
-            "SELECT id, title, description, tag, created_at, updated_at "
-            "FROM notes WHERE id = ? AND user_id = ?",
-            (note_id, user_id),
-        ).fetchone()
+        row = conn.execute(_FETCH_NOTE_BY_ID, (note_id, user_id)).fetchone()
     return _row_to_note(row)
 
 
 def get_note(note_id: int, *, user_id: int) -> Note | None:
     with tx() as conn:
-        row = conn.execute(
-            "SELECT id, title, description, tag, created_at, updated_at "
-            "FROM notes WHERE id = ? AND user_id = ?",
-            (note_id, user_id),
-        ).fetchone()
+        row = conn.execute(_FETCH_NOTE_BY_ID, (note_id, user_id)).fetchone()
     return _row_to_note(row) if row else None
 
 
@@ -150,11 +148,7 @@ def update_note(
             args.append(ts)
 
         if not set_clauses:
-            row = conn.execute(
-                "SELECT id, title, description, tag, created_at, updated_at "
-                "FROM notes WHERE id = ? AND user_id = ?",
-                (note_id, user_id),
-            ).fetchone()
+            row = conn.execute(_FETCH_NOTE_BY_ID, (note_id, user_id)).fetchone()
             return _row_to_note(row)
 
         set_clauses.append("updated_at = ?")
@@ -165,11 +159,7 @@ def update_note(
             f"UPDATE notes SET {', '.join(set_clauses)} WHERE id = ? AND user_id = ?",
             args,
         )
-        row = conn.execute(
-            "SELECT id, title, description, tag, created_at, updated_at "
-            "FROM notes WHERE id = ? AND user_id = ?",
-            (note_id, user_id),
-        ).fetchone()
+        row = conn.execute(_FETCH_NOTE_BY_ID, (note_id, user_id)).fetchone()
     return _row_to_note(row)
 
 

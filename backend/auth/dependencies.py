@@ -8,8 +8,7 @@ from backend.auth import service as auth_service
 from backend.auth import tokens
 from backend.auth.models import UserPublic
 
-# `auto_error=False` so we can return a consistent 401 shape ourselves rather
-# than FastAPI's default 403 when the header is absent.
+# auto_error=False so we own the 401 shape (FastAPI's default is 403 when the header is absent).
 _scheme = HTTPBearer(auto_error=False)
 
 

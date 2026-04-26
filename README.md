@@ -71,7 +71,7 @@ cp .env.example .env
 | Variable | Default | Notes |
 |---|---|---|
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama daemon URL |
-| `OLLAMA_MODEL` | `llama3.1` | Default local chat model |
+| `OLLAMA_MODEL` | `llama3.2` | Default local chat model |
 | `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model for search |
 | `DB_PATH` | `./data/notes.db` | SQLite file path (auto-created) |
 | `MAX_TOOL_HOPS` | `5` | Per-turn tool-call limit |

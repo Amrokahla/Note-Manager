@@ -15,7 +15,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "Note Agent",
-  description: "Conversational note-taking agent powered by llama3.2.",
+  description: "Conversational note-taking agent.",
 };
 
 export default function RootLayout({

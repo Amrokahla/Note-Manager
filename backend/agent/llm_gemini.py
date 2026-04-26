@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
+import threading
 from typing import Any, Callable
 
 from google import genai
@@ -14,6 +16,69 @@ from backend.config import settings
 from backend.tools.schemas import TOOL_DEFS
 
 logger = logging.getLogger(__name__)
+
+
+_caches: dict[str, str] = {}
+_cache_lock = threading.Lock()
+
+
+def _cache_key(model: str, sys_instr: str | None, tools_input: list[dict] | None) -> str:
+    """Hash the inputs that produced the request — translation is deterministic."""
+    if not sys_instr or not tools_input:
+        return ""
+    canonical = f"{model}|{sys_instr}|{json.dumps(tools_input, sort_keys=True, default=str)}"
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _get_or_create_cache(
+    client: genai.Client,
+    model: str,
+    sys_instr: str | None,
+    tools_input: list[dict] | None,
+    gemini_tools: list[genai_types.Tool],
+) -> str | None:
+    """Return a cache name for this (model, prompt, tools) triple, or None to skip caching."""
+    if not settings.gemini_cache_enabled:
+        return None
+    key = _cache_key(model, sys_instr, tools_input)
+    if not key:
+        return None
+    with _cache_lock:
+        if key in _caches:
+            return _caches[key]
+        try:
+            cache = client.caches.create(
+                model=model,
+                config=genai_types.CreateCachedContentConfig(
+                    system_instruction=sys_instr,
+                    tools=gemini_tools,
+                    ttl=f"{settings.gemini_cache_ttl_seconds}s",
+                    display_name=f"note-agent:{key[:12]}",
+                ),
+            )
+        except genai_errors.APIError as e:
+            logger.warning(
+                "Gemini cache create failed (%s) — proceeding without cache", e
+            )
+            return None
+        _caches[key] = cache.name
+        logger.info(
+            "Gemini cache created name=%s model=%s ttl=%ds",
+            cache.name, model, settings.gemini_cache_ttl_seconds,
+        )
+        return cache.name
+
+
+def _evict_cache(model: str, sys_instr: str | None, tools_input: list[dict] | None) -> None:
+    key = _cache_key(model, sys_instr, tools_input)
+    if not key:
+        return
+    with _cache_lock:
+        _caches.pop(key, None)
+
+
+def _is_cache_error(exc: BaseException) -> bool:
+    return "cache" in str(exc).lower()
 
 
 class GeminiError(RuntimeError):
@@ -275,6 +340,21 @@ def _extract_text_from_parts(parts: list) -> str:
     return "".join(buf)
 
 
+def _log_usage(model: str, usage: Any) -> None:
+    """Log Gemini token usage so we can verify implicit prompt caching is hitting."""
+    if usage is None:
+        return
+    prompt = getattr(usage, "prompt_token_count", None) or 0
+    cached = getattr(usage, "cached_content_token_count", None) or 0
+    output = getattr(usage, "candidates_token_count", None) or 0
+    total = getattr(usage, "total_token_count", None) or 0
+    pct = (100.0 * cached / prompt) if prompt else 0.0
+    logger.info(
+        "gemini usage model=%s prompt=%d cached=%d (%.0f%%) output=%d total=%d",
+        model, prompt, cached, pct, output, total,
+    )
+
+
 def chat(
     messages: list[dict],
     *,
@@ -285,34 +365,71 @@ def chat(
     """Send `messages` to Gemini and return a normalized LLMResponse; streams when `on_delta` is set."""
     client = _get_client()
     system_instruction, contents = _translate_messages(messages)
-    gemini_tools = _translate_tools(tools if tools is not None else TOOL_DEFS)
+    tools_input = tools if tools is not None else TOOL_DEFS
+    gemini_tools = _translate_tools(tools_input)
 
+    cache_name = _get_or_create_cache(
+        client, model, system_instruction, tools_input, gemini_tools
+    )
+
+    try:
+        return _do_chat(
+            client, model, contents, system_instruction, gemini_tools, cache_name, on_delta
+        )
+    except genai_errors.APIError as e:
+        if cache_name and _is_cache_error(e):
+            logger.warning(
+                "Gemini cache %s rejected (%s) — evicting and retrying without cache",
+                cache_name, e,
+            )
+            _evict_cache(model, system_instruction, tools_input)
+            try:
+                return _do_chat(
+                    client, model, contents, system_instruction, gemini_tools, None, on_delta
+                )
+            except genai_errors.APIError as e2:
+                raise _cleanup_gemini_error(model, e2) from e2
+        raise _cleanup_gemini_error(model, e) from e
+
+
+def _do_chat(
+    client: genai.Client,
+    model: str,
+    contents: list[dict],
+    sys_instr: str | None,
+    gemini_tools: list[genai_types.Tool],
+    cache_name: str | None,
+    on_delta: Callable[[str], None] | None,
+) -> LLMResponse:
     thinking_config = (
         genai_types.ThinkingConfig(thinking_budget=0)
         if "flash" in model.lower()
         else None
     )
 
-    config = genai_types.GenerateContentConfig(
-        system_instruction=system_instruction,
-        tools=gemini_tools or None,
-        temperature=0.2,
-        safety_settings=_safety_block_none(),
-        thinking_config=thinking_config,
-    )
+    if cache_name:
+        config = genai_types.GenerateContentConfig(
+            cached_content=cache_name,
+            temperature=0.2,
+            safety_settings=_safety_block_none(),
+            thinking_config=thinking_config,
+        )
+    else:
+        config = genai_types.GenerateContentConfig(
+            system_instruction=sys_instr,
+            tools=gemini_tools or None,
+            temperature=0.2,
+            safety_settings=_safety_block_none(),
+            thinking_config=thinking_config,
+        )
 
     if on_delta is not None:
-        try:
-            return _chat_streaming(client, model, contents, config, on_delta)
-        except genai_errors.APIError as e:
-            raise _cleanup_gemini_error(model, e) from e
+        return _chat_streaming(client, model, contents, config, on_delta)
 
-    try:
-        resp = client.models.generate_content(
-            model=model, contents=contents, config=config
-        )
-    except genai_errors.APIError as e:
-        raise _cleanup_gemini_error(model, e) from e
+    resp = client.models.generate_content(
+        model=model, contents=contents, config=config
+    )
+    _log_usage(model, getattr(resp, "usage_metadata", None))
     return _normalize_response(resp)
 
 
@@ -326,11 +443,15 @@ def _chat_streaming(
     """Consume Gemini's streaming response part-by-part."""
     full_text_parts: list[str] = []
     collected_tool_calls: list[ToolCall] = []
+    last_usage: Any = None
 
     stream = client.models.generate_content_stream(
         model=model, contents=contents, config=config
     )
     for chunk in stream:
+        chunk_usage = getattr(chunk, "usage_metadata", None)
+        if chunk_usage is not None:
+            last_usage = chunk_usage
         candidates = getattr(chunk, "candidates", None) or []
         for cand in candidates:
             content = getattr(cand, "content", None)
@@ -354,6 +475,7 @@ def _chat_streaming(
                         ToolCall(name=fc.name, arguments=args)
                     )
 
+    _log_usage(model, last_usage)
     if collected_tool_calls:
         return LLMResponse(kind="tool_calls", tool_calls=collected_tool_calls)
     content = "".join(full_text_parts)

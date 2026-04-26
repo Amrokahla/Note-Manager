@@ -13,7 +13,6 @@ logger = logging.getLogger(__name__)
 
 MODEL_OPTIONS: dict[str, tuple[str, str | None]] = {
     "ollama":           ("ollama", None),
-    "ollama-llama3.2":  ("ollama", "llama3.2"),
     "gemini-2.5-pro":   ("gemini", "gemini-2.5-pro"),
     "gemini-2.5-flash": ("gemini", "gemini-2.5-flash"),
 }

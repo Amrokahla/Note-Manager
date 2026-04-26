@@ -26,15 +26,13 @@ export interface ToolCallRecord {
 
 export type ModelId =
   | "ollama"
-  | "ollama-llama3.2"
   | "gemini-2.5-pro"
   | "gemini-2.5-flash";
 
 export const MODEL_OPTIONS: { id: ModelId; label: string }[] = [
   { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
   { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
-  { id: "ollama", label: "Ollama (llama3.1)" },
-  { id: "ollama-llama3.2", label: "Ollama (llama3.2)" },
+  { id: "ollama", label: "Ollama" },
 ];
 
 export const DEFAULT_MODEL: ModelId = "gemini-2.5-flash";

@@ -11,7 +11,7 @@ load_dotenv()
 @dataclass(frozen=True)
 class Settings:
     ollama_host: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    ollama_model: str = os.getenv("OLLAMA_MODEL", "llama3.1")
+    ollama_model: str = os.getenv("OLLAMA_MODEL", "llama3.2")
     ollama_embed_model: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
     db_path: str = os.getenv("DB_PATH", "./data/notes.db")
     max_tool_hops: int = int(os.getenv("MAX_TOOL_HOPS", "5"))
@@ -19,6 +19,8 @@ class Settings:
     search_threshold: float = float(os.getenv("SEARCH_THRESHOLD", "0.35"))
     search_fallback_limit: int = int(os.getenv("SEARCH_FALLBACK_LIMIT", "3"))
     gemini_api_key: str | None = os.getenv("GEMINI_API_KEY") or None
+    gemini_cache_enabled: bool = os.getenv("GEMINI_CACHE_ENABLED", "true").lower() == "true"
+    gemini_cache_ttl_seconds: int = int(os.getenv("GEMINI_CACHE_TTL_SECONDS", "3600"))
     auth_secret: str | None = os.getenv("AUTH_SECRET") or None
     auth_token_ttl_minutes: int = int(os.getenv("AUTH_TOKEN_TTL_MINUTES", "10080"))
     auth_bcrypt_cost: int = int(os.getenv("AUTH_BCRYPT_COST", "12"))
